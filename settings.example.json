@@ -1,0 +1,16 @@
+{
+  "audio_source": "browser",
+  "target": null,
+  "model_size": "large-v3",
+  "translation_model": "facebook/nllb-200-distilled-1.3B",
+  "device": "cuda",
+  "target_lang": "eng_Latn",
+  "vad_threshold": 0.5,
+  "vad_min_silence_ms": 800,
+  "vad_min_speech_ms": 300,
+  "vad_max_speech_ms": 12000,
+  "enable_chat": true,
+  "chat_channel": null,
+  "chat_max_messages": 15,
+  "chat_queue_maxsize": 50
+}

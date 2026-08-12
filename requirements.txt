@@ -1,0 +1,11 @@
+streamlink
+faster-whisper
+transformers
+sentencepiece
+numpy
+silero-vad
+py3langid
+
+# torch/torchaudio must be installed separately with a matching CUDA build, e.g.:
+#   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+# (installing them from this file via the default index gives CPU-only/mismatched wheels)

@@ -1,0 +1,17 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# .NET build output (helper/)
+helper/bin/
+helper/obj/
+
+# Machine-specific settings (copy settings.example.json to settings.json)
+settings.json
+
+# Scratch audio from smoke tests
+*.wav
+
+# Local tool state
+.claude/
