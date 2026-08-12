@@ -116,24 +116,19 @@ def main():
             print("error: --target <channel name> is required for --audio-source stream", file=sys.stderr)
             sys.exit(1)
 
-    chat_channel = None
-    if not args.no_chat:
-        chat_channel = args.chat_channel
-        if chat_channel is None and args.audio_source == "stream":
-            chat_channel = target  # in stream mode the target IS the channel name
-        if chat_channel is None:
-            from twitch_translator.firefox_tabs import list_twitch_channels
-            tabs = list_twitch_channels()
-            if len(tabs) == 1:
-                chat_channel = tabs[0]
-                print(f"note: chat channel auto-detected from Firefox tab: {chat_channel}",
-                      file=sys.stderr)
-        if chat_channel is None:
-            print(
-                "note: chat panel disabled — set the chat channel in Settings (… menu) "
-                "or pass --chat-channel <channel>",
-                file=sys.stderr,
-            )
+    # Chat no longer needs a channel at launch — the reader thread idles until
+    # one is set, and the panel's own combobox (or Settings) can set it live.
+    # This is just the *initial* value it'll start on, if any is known yet.
+    chat_channel = args.chat_channel
+    if chat_channel is None and args.audio_source == "stream":
+        chat_channel = target  # in stream mode the target IS the channel name
+    if chat_channel is None and not args.no_chat:
+        from twitch_translator.firefox_tabs import list_twitch_channels
+        tabs = list_twitch_channels()
+        if len(tabs) == 1:
+            chat_channel = tabs[0]
+            print(f"note: chat channel auto-detected from Firefox tab: {chat_channel}",
+                  file=sys.stderr)
 
     pipeline = Pipeline(
         audio_source=args.audio_source,
@@ -149,13 +144,14 @@ def main():
         chat_channel=chat_channel,
         chat_queue_maxsize=args.chat_queue_maxsize,
         glossary=args.glossary or "",
+        chat_disabled=args.no_chat,
     )
     pipeline.start()
 
     s = load_settings()
     overlay = CaptionOverlay(pipeline.caption_queue, pipeline=pipeline,
                              geometry=s["caption_geometry"])
-    if chat_channel:
+    if not args.no_chat:
         overlay.attach_chat(pipeline.chat_out_queue, geometry=s["chat_geometry"])
 
     # The windows are already showing by this point (Tk maps them on creation,

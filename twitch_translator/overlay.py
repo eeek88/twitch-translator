@@ -163,6 +163,11 @@ class _ScrollbackText:
             # absolute bottom after the pending redraw instead.
             self.text.after_idle(lambda: self.text.yview_moveto(1.0))
 
+    def clear(self):
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self.text.configure(state="disabled")
+
 
 class CaptionOverlay:
     def __init__(self, caption_queue: "queue.Queue[object]", poll_ms: int = 100,
@@ -226,14 +231,13 @@ class CaptionOverlay:
         if self.chat_overlay is not None:
             self.chat_overlay.toggle()
         else:
-            # Chat never started this session (no channel was configured at
-            # launch) — a hide/show toggle has nothing to act on. Point at the
-            # actual fix instead of silently doing nothing.
+            # Only reachable with --no-chat: chat panel now starts (idling on
+            # no channel) whenever chat isn't explicitly disabled, so there's
+            # nothing to toggle here at all — no in-app fix to point at.
             messagebox.showinfo(
                 "Chat panel",
-                "Chat isn't running this session — no channel was set when the "
-                "app started.\n\nSet one in Settings… (chat_channel), then restart "
-                "the app to enable it.",
+                "Chat was disabled with --no-chat for this session.\n\n"
+                "Remove that flag (or the equivalent setting) and restart to enable it.",
                 parent=self.root,
             )
 
@@ -294,23 +298,55 @@ class ChatOverlay:
         self.win.geometry(_validate_geometry(geometry) or "380x300+1160+400")
         self.win.minsize(CHAT_MIN_W, CHAT_MIN_H)
 
+        top_bar = tk.Frame(self.win, bg=BG_COLOR)
+        top_bar.pack(side="top", fill="x")
+
+        initial_channel = pipeline.chat_channel if pipeline is not None else None
+        self.channel_var = tk.StringVar(value=initial_channel or "")
+        self.channel_combo = ttk.Combobox(
+            top_bar, textvariable=self.channel_var,
+            values=list_twitch_channels(), width=18, font=("Segoe UI", 9),
+        )
+        self.channel_combo.pack(side="left", padx=(6, 0), pady=3)
+        self.channel_combo.bind("<Return>", self._on_channel_change)
+        self.channel_combo.bind("<<ComboboxSelected>>", self._on_channel_change)
+
+        refresh_btn = tk.Label(top_bar, text="⟳", font=("Segoe UI", 10),
+                               fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
+        refresh_btn.pack(side="left")
+        refresh_btn.bind("<ButtonPress-1>", self._refresh_channels)
+
+        close_btn = tk.Label(top_bar, text="✕", font=("Segoe UI", 11),
+                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6)
+        close_btn.pack(side="right")
+        close_btn.bind("<ButtonPress-1>", lambda _e: self.toggle())
+
         self.scrollback = _ScrollbackText(self.win, ("Segoe UI", 11))
         self.scrollback.text.tag_configure("name", foreground=CHAT_NAME_COLOR,
                                            font=("Segoe UI", 11, "bold"))
         self.scrollback.frame.pack(expand=True, fill="both")
 
-        close_btn = tk.Label(self.win, text="✕", font=("Segoe UI", 11),
-                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6)
-        close_btn.place(relx=1.0, rely=0.0, anchor="ne")
-        close_btn.bind("<ButtonPress-1>", lambda _e: self.toggle())
-        close_btn.lift()
-
         grip = _make_resize_grip(self.win, CHAT_MIN_W, CHAT_MIN_H)
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.lift()
 
-        _make_draggable(self.win, self.win, self.scrollback.text)
+        _make_draggable(self.win, self.win, top_bar, self.scrollback.text)
         self.win.after(self.poll_ms, self._poll)
+
+    def _on_channel_change(self, _event=None):
+        channel = self.channel_var.get().strip().lstrip("#")
+        if not channel or self.pipeline is None:
+            return
+        self.pipeline.set_chat_channel(channel)
+        self.scrollback.clear()
+        try:
+            save_settings({"chat_channel": channel})
+        except OSError:
+            pass
+        self.win.focus_set()  # drop focus out of the combobox now that Enter was handled
+
+    def _refresh_channels(self, _event=None):
+        self.channel_combo["values"] = list_twitch_channels()
 
     def is_visible(self) -> bool:
         return self.win.state() != "withdrawn"
@@ -421,6 +457,11 @@ class SettingsDialog:
         self.win.destroy()
 
     def _apply_live(self, updates: dict):
-        if "enable_chat" in updates and self.overlay.chat_overlay is not None:
-            if updates["enable_chat"] != self.overlay.chat_overlay.is_visible():
-                self.overlay.chat_overlay.toggle()
+        chat_overlay = self.overlay.chat_overlay
+        if "enable_chat" in updates and chat_overlay is not None:
+            if updates["enable_chat"] != chat_overlay.is_visible():
+                chat_overlay.toggle()
+        if "chat_channel" in updates and chat_overlay is not None:
+            new_channel = updates["chat_channel"]
+            chat_overlay.channel_var.set(new_channel or "")
+            chat_overlay._on_channel_change()

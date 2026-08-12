@@ -72,11 +72,15 @@ class Pipeline:
         chat_channel: Optional[str] = None,
         chat_queue_maxsize: int = 50,
         glossary: str = "",
+        chat_disabled: bool = False,
     ):
         self.audio_source = audio_source
         self.target = target
         self.target_lang = target_lang
         self.chat_channel = chat_channel
+        self.chat_disabled = chat_disabled
+        self._chat_reader = None
+        self._chat_reader_lock = threading.Lock()
 
         self.vad = VADSegmenter(
             threshold=vad_threshold,
@@ -95,6 +99,19 @@ class Pipeline:
         self._chat_enabled = threading.Event()
         self._chat_enabled.set()
         self._threads: list[threading.Thread] = []
+
+    def set_chat_channel(self, channel: Optional[str]) -> None:
+        """Switch the chat reader to a different channel immediately, rather
+        than waiting for the old connection to notice and time out."""
+        self.chat_channel = channel
+        while True:  # old channel's backlog shouldn't bleed into the new one
+            try:
+                self._chat_in_queue.get_nowait()
+            except queue.Empty:
+                break
+        with self._chat_reader_lock:
+            if self._chat_reader is not None:
+                self._chat_reader.stop()
 
     def set_chat_enabled(self, enabled: bool) -> None:
         """Pause/resume chat translation at runtime (e.g. when the panel is hidden).
@@ -138,18 +155,26 @@ class Pipeline:
     def _read_chat(self):
         from py3langid.langid import LanguageIdentifier, MODEL_FILE
 
-        from .chat import chat_messages
+        from .chat import ChatReader
 
         identifier = LanguageIdentifier.from_pickled_model(MODEL_FILE, norm_probs=True)
         identifier.set_languages([l for l in WHISPER_TO_NLLB if l in identifier.nb_classes])
-        target_whisper_langs = {w for w, n in WHISPER_TO_NLLB.items() if n == self.target_lang}
 
         backoff = 2.0
         while not self._stop.is_set():
+            channel = self.chat_channel
+            if not channel:
+                time.sleep(0.5)  # no channel picked yet — idle until set_chat_channel()
+                continue
+
+            target_whisper_langs = {w for w, n in WHISPER_TO_NLLB.items() if n == self.target_lang}
+            reader = ChatReader(channel)
+            with self._chat_reader_lock:
+                self._chat_reader = reader
             try:
-                for username, message in chat_messages(self.chat_channel):
-                    if self._stop.is_set():
-                        return
+                for username, message in reader.messages():
+                    if self._stop.is_set() or self.chat_channel != channel:
+                        break  # explicit stop, or a deliberate channel switch — not a failure
                     backoff = 2.0
                     if not self._chat_enabled.is_set():
                         continue  # panel hidden: keep the socket alive but do no work
@@ -168,7 +193,17 @@ class Pipeline:
             except Exception as exc:
                 if self._stop.is_set():
                     return
-                _log(f"[chat error, retrying: {exc}]")
+                if self.chat_channel == channel:  # a switch-triggered close isn't an error
+                    _log(f"[chat error, retrying: {exc}]")
+            finally:
+                with self._chat_reader_lock:
+                    if self._chat_reader is reader:
+                        self._chat_reader = None
+
+            if self._stop.is_set():
+                return
+            if self.chat_channel != channel:
+                continue  # switched channels — reconnect immediately, no backoff
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 
@@ -214,7 +249,7 @@ class Pipeline:
             threading.Thread(target=self._capture_and_segment, daemon=True),
             threading.Thread(target=self._gpu_worker, daemon=True),
         ]
-        if self.chat_channel:
+        if not self.chat_disabled:
             self._threads.append(threading.Thread(target=self._read_chat, daemon=True))
         for t in self._threads:
             t.start()

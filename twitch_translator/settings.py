@@ -71,8 +71,8 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="utterances are cut at this length to bound latency"),
     SettingSpec("enable_chat", "Chat panel", "bool", live=True,
                 help="show translated chat messages in a second window"),
-    SettingSpec("chat_channel", "Chat channel", "text",
-                help="Twitch channel whose chat to translate (needed in browser mode)"),
+    SettingSpec("chat_channel", "Chat channel", "text", live=True,
+                help="Twitch channel whose chat to translate (also editable directly on the chat panel)"),
     SettingSpec("chat_queue_maxsize", "Chat queue size", "int",
                 help="pending chat translations before new ones are dropped"),
 ]
