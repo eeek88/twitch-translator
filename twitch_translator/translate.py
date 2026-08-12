@@ -14,6 +14,11 @@ class Translator:
         dtype = torch.float16 if device == "cuda" else torch.float32
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_name, dtype=dtype, use_safetensors=True).to(device)
         self.model.eval()
+        # NLLB checkpoints ship max_length=200 in their generation config; we pass
+        # max_new_tokens per call, and transformers warns about the redundant pair
+        # on every single generate(). Drop the checkpoint's limit so ours is the
+        # only one in play.
+        self.model.generation_config.max_length = None
 
     @torch.inference_mode()
     def translate(self, text: str, src_lang: str, tgt_lang: str = "eng_Latn") -> str:
