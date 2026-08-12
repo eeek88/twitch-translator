@@ -8,6 +8,7 @@ scroll up to read, scroll back to the bottom to resume auto-following.
 from __future__ import annotations
 
 import queue
+import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
@@ -20,6 +21,9 @@ BG_COLOR = "#101010"
 FG_COLOR = "#ffffff"
 CHAT_NAME_COLOR = "#7fb8ff"
 CONTROL_COLOR = "#9a9a9a"
+TIMESTAMP_COLOR = "#6f6f6f"
+SCROLLBAR_IDLE = "#242424"    # barely visible against the background...
+SCROLLBAR_HOVER = "#7a7a7a"   # ...until hovered or dragged
 WINDOW_ALPHA = 0.82
 HISTORY_LINES = 300
 
@@ -65,29 +69,62 @@ def _make_resize_grip(win: tk.Misc, min_w: int, min_h: int) -> tk.Label:
     return grip
 
 
-class _ScrollbackText:
-    """A read-only, wheel-scrollable Text that auto-follows only while the
-    view is already at the bottom, and trims history past HISTORY_LINES."""
+_SCROLLBAR_STYLE_READY = False
 
-    def __init__(self, parent: tk.Misc, font: tuple, justify: Optional[str] = None):
+
+def _thin_scrollbar_style() -> str:
+    """A ~7px flat scrollbar, near-invisible until hovered/dragged. Tk can't
+    make a single widget transparent, so 'transparent' is emulated by keeping
+    the idle thumb barely lighter than the window background."""
+    global _SCROLLBAR_STYLE_READY
+    style = ttk.Style()
+    if not _SCROLLBAR_STYLE_READY:
+        style.theme_use("clam")  # the Windows-native theme ignores scrollbar colors
+        style.layout("Thin.Vertical.TScrollbar",
+                     [("Vertical.Scrollbar.trough",
+                       {"children": [("Vertical.Scrollbar.thumb",
+                                      {"expand": "1", "sticky": "nswe"})],
+                        "sticky": "ns"})])  # no arrow buttons
+        style.configure("Thin.Vertical.TScrollbar",
+                        troughcolor=BG_COLOR, background=SCROLLBAR_IDLE,
+                        bordercolor=BG_COLOR, arrowsize=0, borderwidth=0,
+                        relief="flat", width=7)
+        style.map("Thin.Vertical.TScrollbar",
+                  background=[("active", SCROLLBAR_HOVER), ("pressed", SCROLLBAR_HOVER)])
+        _SCROLLBAR_STYLE_READY = True
+    return "Thin.Vertical.TScrollbar"
+
+
+class _ScrollbackText:
+    """A read-only, wheel-scrollable Text with a thin drag scrollbar and a dim
+    timestamp on every line. Auto-follows only while the view is at the
+    bottom, and trims history past HISTORY_LINES."""
+
+    def __init__(self, parent: tk.Misc, font: tuple):
+        self.frame = tk.Frame(parent, bg=BG_COLOR)
         self.text = tk.Text(
-            parent, font=font, fg=FG_COLOR, bg=BG_COLOR, wrap="word",
+            self.frame, font=font, fg=FG_COLOR, bg=BG_COLOR, wrap="word",
             state="disabled", relief="flat", padx=12, pady=8, cursor="arrow",
         )
-        if justify:
-            self.text.tag_configure("justify", justify=justify)
-            self._base_tags: tuple[str, ...] = ("justify",)
-        else:
-            self._base_tags = ()
+        scrollbar = ttk.Scrollbar(self.frame, orient="vertical",
+                                  style=_thin_scrollbar_style(),
+                                  command=self.text.yview)
+        self.text.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.text.pack(side="left", expand=True, fill="both")
+
+        time_size = max(8, font[1] - 6)
+        self.text.tag_configure("time", foreground=TIMESTAMP_COLOR,
+                                font=("Consolas", time_size))
 
     def append(self, segments: list[tuple[str, Optional[str]]]):
-        """segments: list of (text, extra_tag). Appends one line."""
+        """segments: list of (text, extra_tag). Appends one timestamped line."""
         at_bottom = self.text.yview()[1] >= 0.999
         self.text.configure(state="normal")
+        self.text.insert("end", time.strftime("%H:%M:%S "), ("time",))
         for content, tag in segments:
-            tags = self._base_tags + ((tag,) if tag else ())
-            self.text.insert("end", content, tags)
-        self.text.insert("end", "\n", self._base_tags)
+            self.text.insert("end", content, (tag,) if tag else ())
+        self.text.insert("end", "\n")
         line_count = int(self.text.index("end-1c").split(".")[0])
         if line_count > HISTORY_LINES:
             self.text.delete("1.0", f"{line_count - HISTORY_LINES + 1}.0")
@@ -117,8 +154,8 @@ class CaptionOverlay:
         self.root.geometry(geometry or "900x160+180+760")
         self.root.minsize(CAPTION_MIN_W, CAPTION_MIN_H)
 
-        self.scrollback = _ScrollbackText(self.root, ("Segoe UI", 18, "bold"), justify="center")
-        self.scrollback.text.pack(expand=True, fill="both")
+        self.scrollback = _ScrollbackText(self.root, ("Segoe UI", 18, "bold"))
+        self.scrollback.frame.pack(expand=True, fill="both")
 
         # Corner controls float over the text so the full window is text area.
         menu_btn = tk.Label(self.root, text="…", font=("Segoe UI", 13, "bold"),
@@ -211,7 +248,7 @@ class ChatOverlay:
         self.scrollback = _ScrollbackText(self.win, ("Segoe UI", 11))
         self.scrollback.text.tag_configure("name", foreground=CHAT_NAME_COLOR,
                                            font=("Segoe UI", 11, "bold"))
-        self.scrollback.text.pack(expand=True, fill="both")
+        self.scrollback.frame.pack(expand=True, fill="both")
 
         close_btn = tk.Label(self.win, text="✕", font=("Segoe UI", 11),
                              fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6)
