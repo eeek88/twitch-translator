@@ -4,6 +4,8 @@ from __future__ import annotations
 import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
+from .text_repetition import has_repetition_loop
+
 DEFAULT_MODEL_NAME = "facebook/nllb-200-distilled-1.3B"
 
 
@@ -41,5 +43,16 @@ class Translator:
             **inputs,
             forced_bos_token_id=forced_bos_token_id,
             max_new_tokens=256,
+            # The repetition-loop failure isn't just a Whisper/ASR thing — NLLB
+            # hits it too (confirmed live: a short chat message translated into
+            # "really," repeated dozens of times). no_repeat_ngram_size blocks
+            # any 3-token sequence from being generated twice, stopping the loop
+            # at the source instead of only catching it after the fact.
+            no_repeat_ngram_size=3,
         )
-        return self.tokenizer.batch_decode(output, skip_special_tokens=True)[0].strip()
+        result = self.tokenizer.batch_decode(output, skip_special_tokens=True)[0].strip()
+        # Safety net for whatever no_repeat_ngram_size doesn't catch (e.g. a
+        # longer phrase repeating with enough varying tokens between repeats).
+        if result and has_repetition_loop(result):
+            return ""
+        return result

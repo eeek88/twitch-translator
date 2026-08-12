@@ -27,6 +27,11 @@ class VADSegmenter:
         self.min_silence_frames = max(1, int(min_silence_ms / frame_ms))
         self.min_speech_samples = int(SAMPLE_RATE * min_speech_ms / 1000)
         self.max_speech_samples = int(SAMPLE_RATE * max_speech_ms / 1000)
+        # Read from the UI thread for the "listening" indicator — reflects
+        # whether the last processed frame looked like speech, updated every
+        # ~32ms. A plain bool is fine to read across threads without a lock:
+        # it's only ever used for an eventually-consistent display, not logic.
+        self.is_speaking = False
 
     def segments(self, pcm_chunks: Iterator[bytes]) -> Iterator[np.ndarray]:
         """pcm_chunks: raw s16le mono 16kHz bytes. Yields float32 audio in [-1, 1] per utterance."""
@@ -62,6 +67,8 @@ class VADSegmenter:
                         speech_frames = []
                         in_speech = False
                         silence_run = 0
+
+                self.is_speaking = in_speech
 
         if speech_frames and sum(len(a) for a in speech_frames) >= self.min_speech_samples:
             yield np.concatenate(speech_frames)

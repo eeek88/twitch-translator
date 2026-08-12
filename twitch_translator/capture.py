@@ -48,7 +48,11 @@ def _require(binary: str) -> str:
     return path
 
 
-def _read_ffmpeg_pcm(ffmpeg_proc: subprocess.Popen) -> Iterator[bytes]:
+def _read_ffmpeg_pcm(ffmpeg_proc: subprocess.Popen, upstream_proc: subprocess.Popen) -> Iterator[bytes]:
+    """upstream_proc is the helper.exe/streamlink process piping into ffmpeg's
+    stdin. It must be terminated here too: on generator exit only ffmpeg_proc
+    was being killed, leaving upstream_proc orphaned (confirmed live — multiple
+    stray FirefoxLoopbackCapture.exe processes accumulated across reconnects)."""
     assert ffmpeg_proc.stdout is not None
     try:
         while True:
@@ -58,6 +62,7 @@ def _read_ffmpeg_pcm(ffmpeg_proc: subprocess.Popen) -> Iterator[bytes]:
             yield chunk
     finally:
         ffmpeg_proc.terminate()
+        upstream_proc.terminate()
 
 
 def browser_audio_stream(process_name: str = "firefox") -> Iterator[bytes]:
@@ -96,7 +101,7 @@ def browser_audio_stream(process_name: str = "firefox") -> Iterator[bytes]:
     )
     helper_proc.stdout.close()  # let ffmpeg own the read end
 
-    yield from _read_ffmpeg_pcm(ffmpeg_proc)
+    yield from _read_ffmpeg_pcm(ffmpeg_proc, helper_proc)
 
 
 def twitch_stream_audio(channel: str) -> Iterator[bytes]:
@@ -127,7 +132,7 @@ def twitch_stream_audio(channel: str) -> Iterator[bytes]:
     )
     streamlink_proc.stdout.close()
 
-    yield from _read_ffmpeg_pcm(ffmpeg_proc)
+    yield from _read_ffmpeg_pcm(ffmpeg_proc, streamlink_proc)
 
 
 def audio_stream(source: str, target: str) -> Iterator[bytes]:

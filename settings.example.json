@@ -14,5 +14,7 @@
   "chat_queue_maxsize": 50,
   "caption_geometry": null,
   "chat_geometry": null,
-  "glossary": ""
+  "glossary": "",
+  "caption_font_size": 18,
+  "chat_font_size": 11
 }

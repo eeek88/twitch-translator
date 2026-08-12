@@ -27,6 +27,8 @@ DEFAULTS: dict[str, Any] = {
     "chat_queue_maxsize": 50,        # pending chat translations before new ones are dropped
     "caption_geometry": None,        # last caption-window geometry ("WxH+X+Y"), saved on exit
     "chat_geometry": None,           # last chat-window geometry, saved on exit
+    "caption_font_size": 18,         # also adjustable with Ctrl+scroll on the caption window
+    "chat_font_size": 11,            # also adjustable with Ctrl+scroll on the chat window
 }
 
 
@@ -75,6 +77,10 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="Twitch channel whose chat to translate (also editable directly on the chat panel)"),
     SettingSpec("chat_queue_maxsize", "Chat queue size", "int",
                 help="pending chat translations before new ones are dropped"),
+    SettingSpec("caption_font_size", "Caption font size", "int", live=True,
+                help="also adjustable with Ctrl+scroll directly on the caption window"),
+    SettingSpec("chat_font_size", "Chat font size", "int", live=True,
+                help="also adjustable with Ctrl+scroll directly on the chat window"),
 ]
 
 

@@ -233,6 +233,9 @@ class Pipeline:
                     continue
                 nllb_lang = to_nllb(lang)
                 translated = self.translator.translate(text, nllb_lang, self.target_lang)
+                if not translated:
+                    _log(f"[{lang}] {text!r} -> (suppressed: repetition loop)")
+                    continue
                 _log(f"[{lang}] {text!r} -> {translated!r}")
                 self.caption_queue.put(Caption(lang, text, translated))
             except Exception as exc:
@@ -247,6 +250,9 @@ class Pipeline:
             return
         try:
             translated = self.translator.translate(message, to_nllb(lang), self.target_lang)
+            if not translated:
+                _log(f"[chat/{lang}] {username}: {message!r} -> (suppressed: repetition loop)")
+                return
             _log(f"[chat/{lang}] {username}: {message!r} -> {translated!r}")
             self.chat_out_queue.put(ChatLine(username, lang, message, translated))
         except Exception as exc:

@@ -13,7 +13,7 @@ import re
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
-from typing import Optional
+from typing import Callable, Optional
 
 from .firefox_tabs import list_twitch_channels
 from .pipeline import Caption, ChatLine, Pipeline
@@ -26,8 +26,12 @@ CONTROL_COLOR = "#9a9a9a"
 TIMESTAMP_COLOR = "#6f6f6f"
 SCROLLBAR_IDLE = "#242424"    # barely visible against the background...
 SCROLLBAR_HOVER = "#7a7a7a"   # ...until hovered or dragged
+LISTENING_IDLE_COLOR = "#3a3a3a"   # dim: no speech detected right now
+LISTENING_ACTIVE_COLOR = "#5fd68a"  # soft green: VAD currently sees speech
+TOOLTIP_BG = "#2a2a2a"
 WINDOW_ALPHA = 0.82
 HISTORY_LINES = 300
+MIN_FONT_SIZE, MAX_FONT_SIZE = 8, 48
 
 CAPTION_MIN_W, CAPTION_MIN_H = 300, 80
 CHAT_MIN_W, CHAT_MIN_H = 200, 120
@@ -126,9 +130,18 @@ def _thin_scrollbar_style() -> str:
 class _ScrollbackText:
     """A read-only, wheel-scrollable Text with a thin drag scrollbar and a dim
     timestamp on every line. Auto-follows only while the view is at the
-    bottom, and trims history past HISTORY_LINES."""
+    bottom, and trims history past HISTORY_LINES. Ctrl+wheel resizes the font
+    (persisted via on_font_size_change); hovering a line with an original-text
+    counterpart shows it in a small tooltip."""
 
-    def __init__(self, parent: tk.Misc, font: tuple):
+    def __init__(self, parent: tk.Misc, font: tuple,
+                 on_font_size_change: Optional[Callable[[int], None]] = None):
+        self.font_family = font[0]
+        self.font_size = font[1]
+        self._font_extra = font[2:]
+        self._time_base_size = font[1]
+        self.on_font_size_change = on_font_size_change
+
         self.frame = tk.Frame(parent, bg=BG_COLOR)
         self.text = tk.Text(
             self.frame, font=font, fg=FG_COLOR, bg=BG_COLOR, wrap="word",
@@ -141,17 +154,35 @@ class _ScrollbackText:
         scrollbar.pack(side="right", fill="y")
         self.text.pack(side="left", expand=True, fill="both")
 
-        time_size = max(8, font[1] - 6)
         self.text.tag_configure("time", foreground=TIMESTAMP_COLOR,
-                                font=("Consolas", time_size))
+                                font=("Consolas", max(MIN_FONT_SIZE, font[1] - 6)))
 
-    def append(self, segments: list[tuple[str, Optional[str]]]):
-        """segments: list of (text, extra_tag). Appends one timestamped line."""
+        self._originals: dict[str, str] = {}
+        self._next_tag_id = 0
+        self._tooltip: Optional[tk.Toplevel] = None
+        self._hovered_tag: Optional[str] = None
+        self.text.bind("<Motion>", self._on_motion)
+        self.text.bind("<Leave>", self._on_leave)
+        self.text.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+
+    def append(self, segments: list[tuple[str, Optional[str]]], original: Optional[str] = None):
+        """segments: list of (text, extra_tag). Appends one timestamped line.
+        original, if given, becomes a hover tooltip over the whole line."""
+        line_tag = None
+        if original:
+            line_tag = f"orig{self._next_tag_id}"
+            self._next_tag_id += 1
+            self._originals[line_tag] = original
+            if len(self._originals) > HISTORY_LINES:
+                del self._originals[next(iter(self._originals))]
+
         at_bottom = self.text.yview()[1] >= 0.999
         self.text.configure(state="normal")
-        self.text.insert("end", time.strftime("%H:%M:%S "), ("time",))
+        extra = (line_tag,) if line_tag else ()
+        self.text.insert("end", time.strftime("%H:%M:%S "), ("time",) + extra)
         for content, tag in segments:
-            self.text.insert("end", content, (tag,) if tag else ())
+            tags = ((tag,) if tag else ()) + extra
+            self.text.insert("end", content, tags)
         self.text.insert("end", "\n")
         line_count = int(self.text.index("end-1c").split(".")[0])
         if line_count > HISTORY_LINES:
@@ -167,6 +198,68 @@ class _ScrollbackText:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
+        self._originals.clear()
+        self._hide_tooltip()
+
+    # --- font size ------------------------------------------------------
+
+    def set_font_size(self, size: int) -> int:
+        size = max(MIN_FONT_SIZE, min(MAX_FONT_SIZE, size))
+        self.font_size = size
+        self.text.configure(font=(self.font_family, size, *self._font_extra))
+        self.text.tag_configure("time", font=("Consolas", max(MIN_FONT_SIZE, size - 6)))
+        return size
+
+    def _on_ctrl_wheel(self, event):
+        step = 1 if event.delta > 0 else -1
+        new_size = self.set_font_size(self.font_size + step)
+        if self.on_font_size_change:
+            self.on_font_size_change(new_size)
+        return "break"
+
+    # --- hover-to-see-original -------------------------------------------
+
+    def _on_motion(self, event):
+        try:
+            index = self.text.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return
+        tags = self.text.tag_names(index)
+        hover_tag = next((t for t in tags if t.startswith("orig")), None)
+        if hover_tag == self._hovered_tag:
+            if self._tooltip:
+                self._move_tooltip(event)
+            return
+        self._hovered_tag = hover_tag
+        self._hide_tooltip()
+        if hover_tag and hover_tag in self._originals:
+            self._show_tooltip(event, self._originals[hover_tag])
+
+    def _on_leave(self, _event=None):
+        self._hovered_tag = None
+        self._hide_tooltip()
+
+    def _show_tooltip(self, event, content: str):
+        tip = tk.Toplevel(self.text)
+        tip.overrideredirect(True)
+        tip.attributes("-topmost", True)
+        tk.Label(tip, text=content, bg=TOOLTIP_BG, fg=FG_COLOR,
+                font=("Segoe UI", 9), padx=8, pady=4, wraplength=360,
+                justify="left").pack()
+        self._tooltip = tip
+        self._move_tooltip(event)
+
+    def _move_tooltip(self, event):
+        if self._tooltip is None:
+            return
+        x = self.text.winfo_rootx() + event.x + 16
+        y = self.text.winfo_rooty() + event.y + 16
+        self._tooltip.geometry(f"+{x}+{y}")
+
+    def _hide_tooltip(self):
+        if self._tooltip is not None:
+            self._tooltip.destroy()
+            self._tooltip = None
 
 
 class CaptionOverlay:
@@ -187,7 +280,11 @@ class CaptionOverlay:
         self.root.geometry(_validate_geometry(geometry) or "900x160+180+760")
         self.root.minsize(CAPTION_MIN_W, CAPTION_MIN_H)
 
-        self.scrollback = _ScrollbackText(self.root, ("Segoe UI", 18, "bold"))
+        font_size = load_settings().get("caption_font_size", 18)
+        self.scrollback = _ScrollbackText(
+            self.root, ("Segoe UI", font_size, "bold"),
+            on_font_size_change=lambda size: save_settings({"caption_font_size": size}),
+        )
         self.scrollback.frame.pack(expand=True, fill="both")
 
         # Corner controls float over the text so the full window is text area.
@@ -202,6 +299,14 @@ class CaptionOverlay:
         self.chat_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-28)
         self.chat_btn.bind("<ButtonPress-1>", self._toggle_chat_button)
         self.chat_btn.lift()
+
+        # Subtle "listening" indicator: lights up while VAD currently sees
+        # speech, so there's feedback in the gap between talking and a
+        # caption actually landing (which can be a couple seconds).
+        self.listening_dot = tk.Label(self.root, text="●", font=("Segoe UI", 9),
+                                      fg=LISTENING_IDLE_COLOR, bg=BG_COLOR, padx=6)
+        self.listening_dot.place(relx=0.0, rely=0.0, anchor="nw")
+        self.listening_dot.lift()
 
         grip = _make_resize_grip(self.root, CAPTION_MIN_W, CAPTION_MIN_H)
         grip.place(relx=1.0, rely=1.0, anchor="se")
@@ -264,9 +369,14 @@ class CaptionOverlay:
                 if item is None:
                     continue
                 caption: Caption = item
-                self.scrollback.append([(caption.translated_text, None)])
+                self.scrollback.append([(caption.translated_text, None)],
+                                       original=caption.original_text)
         except queue.Empty:
             pass
+        if self.pipeline is not None:
+            speaking = self.pipeline.vad.is_speaking
+            self.listening_dot.configure(
+                fg=LISTENING_ACTIVE_COLOR if speaking else LISTENING_IDLE_COLOR)
         self.root.after(self.poll_ms, self._poll)
 
     def attach_chat(self, chat_queue: "queue.Queue[ChatLine]",
@@ -321,9 +431,13 @@ class ChatOverlay:
         close_btn.pack(side="right")
         close_btn.bind("<ButtonPress-1>", lambda _e: self.toggle())
 
-        self.scrollback = _ScrollbackText(self.win, ("Segoe UI", 11))
+        chat_font_size = load_settings().get("chat_font_size", 11)
+        self.scrollback = _ScrollbackText(
+            self.win, ("Segoe UI", chat_font_size),
+            on_font_size_change=self._on_font_size_change,
+        )
         self.scrollback.text.tag_configure("name", foreground=CHAT_NAME_COLOR,
-                                           font=("Segoe UI", 11, "bold"))
+                                           font=("Segoe UI", chat_font_size, "bold"))
         self.scrollback.frame.pack(expand=True, fill="both")
 
         grip = _make_resize_grip(self.win, CHAT_MIN_W, CHAT_MIN_H)
@@ -332,6 +446,12 @@ class ChatOverlay:
 
         _make_draggable(self.win, self.win, top_bar, self.scrollback.text)
         self.win.after(self.poll_ms, self._poll)
+
+    def _on_font_size_change(self, size: int):
+        # "name" (the bold username prefix) isn't the base font, so it needs
+        # its own resize — set_font_size() only touches the base text + timestamp.
+        self.scrollback.text.tag_configure("name", font=("Segoe UI", size, "bold"))
+        save_settings({"chat_font_size": size})
 
     def _on_channel_change(self, _event=None):
         channel = self.channel_var.get().strip().lstrip("#")
@@ -368,7 +488,7 @@ class ChatOverlay:
                 self.scrollback.append([
                     (f"{line.username}: ", "name"),
                     (line.translated_text, None),
-                ])
+                ], original=line.original_text)
         except queue.Empty:
             pass
         self.win.after(self.poll_ms, self._poll)
@@ -465,3 +585,8 @@ class SettingsDialog:
             new_channel = updates["chat_channel"]
             chat_overlay.channel_var.set(new_channel or "")
             chat_overlay._on_channel_change()
+        if "caption_font_size" in updates:
+            self.overlay.scrollback.set_font_size(updates["caption_font_size"])
+        if "chat_font_size" in updates and chat_overlay is not None:
+            size = chat_overlay.scrollback.set_font_size(updates["chat_font_size"])
+            chat_overlay.scrollback.text.tag_configure("name", font=("Segoe UI", size, "bold"))
