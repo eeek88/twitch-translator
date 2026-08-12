@@ -53,7 +53,11 @@ class ChatLine:
 def _log(line: str) -> None:
     # main.py's console/log Tee handles non-UTF-8-console fallback centrally;
     # a plain write here works whether stderr is the real console or that Tee.
-    print(line, file=sys.stderr)
+    # flush=True matters: the log file is opened in default (block) buffering
+    # since it isn't a terminal, so without this, lines sit invisible in the
+    # buffer until enough accumulate — exactly when you'd want to tail the
+    # log to see what just happened, it wouldn't be there yet.
+    print(line, file=sys.stderr, flush=True)
 
 
 class Pipeline:
@@ -82,14 +86,18 @@ class Pipeline:
         self._chat_reader = None
         self._chat_reader_lock = threading.Lock()
 
+        _log("Loading voice-activity detector (Silero VAD)...")
         self.vad = VADSegmenter(
             threshold=vad_threshold,
             min_silence_ms=vad_min_silence_ms,
             min_speech_ms=vad_min_speech_ms,
             max_speech_ms=vad_max_speech_ms,
         )
+        _log(f"Loading speech recognition model (faster-whisper {model_size})...")
         self.asr = ASR(model_size=model_size, device=device, glossary=glossary)
+        _log(f"Loading translation model ({translation_model})...")
         self.translator = Translator(model_name=translation_model, device=device)
+        _log("Models loaded.")
 
         self._utterance_queue: "queue.Queue[object]" = queue.Queue()
         self._chat_in_queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue(maxsize=chat_queue_maxsize)

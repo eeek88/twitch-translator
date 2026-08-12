@@ -5,6 +5,7 @@ sentencepiece
 numpy
 silero-vad
 py3langid
+accelerate
 lz4
 
 # torch/torchaudio must be installed separately with a matching CUDA build, e.g.:

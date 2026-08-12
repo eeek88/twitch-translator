@@ -12,8 +12,12 @@ import ctypes
 import sys
 from pathlib import Path
 
-from twitch_translator.overlay import CaptionOverlay
-from twitch_translator.pipeline import Pipeline
+# overlay/pipeline are NOT imported here — they transitively pull in
+# torch/transformers/faster-whisper, which take several seconds just to
+# import. Importing them at module level means Python spends that whole time
+# before main() runs a single line of our own code, so the console sits
+# blank with no way to tell it's not just hung. main() prints a startup
+# message first, then imports these locally right after.
 from twitch_translator.settings import load_settings
 
 LOG_PATH = Path(__file__).resolve().parent / "logs" / "latest.log"
@@ -38,6 +42,11 @@ class _Tee:
                 buf = getattr(s, "buffer", None)
                 if buf is not None:
                     buf.write(data.encode("utf-8", errors="replace"))
+            # The log file isn't a terminal, so it's block-buffered by default —
+            # writes sit invisible until enough accumulate. Flush every write so
+            # tailing the log always shows what just happened, not what happened
+            # several KB ago.
+            s.flush()
         return len(data)
 
     def flush(self):
@@ -106,6 +115,12 @@ def parse_args():
 
 def main():
     _tee_output_to_log()
+    print("Twitch Live Translator starting...", file=sys.stderr)
+    print("Importing torch/transformers/faster-whisper (several seconds, one-time per launch)...",
+          file=sys.stderr)
+    from twitch_translator.overlay import CaptionOverlay
+    from twitch_translator.pipeline import Pipeline
+
     args = parse_args()
 
     target = args.target
