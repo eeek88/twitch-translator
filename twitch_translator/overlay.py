@@ -29,6 +29,7 @@ SCROLLBAR_HOVER = "#7a7a7a"   # ...until hovered or dragged
 LISTENING_IDLE_COLOR = "#3a3a3a"   # dim: no speech detected right now
 LISTENING_ACTIVE_COLOR = "#5fd68a"  # soft green: VAD currently sees speech
 TOOLTIP_BG = "#2a2a2a"
+COMBINE_ACTIVE_COLOR = "#7fb8ff"   # same accent as chat usernames: "docked" state
 WINDOW_ALPHA = 0.82
 HISTORY_LINES = 300
 MIN_FONT_SIZE, MAX_FONT_SIZE = 8, 48
@@ -270,6 +271,8 @@ class CaptionOverlay:
         self.poll_ms = poll_ms
         self.pipeline = pipeline
         self.chat_overlay: Optional[ChatOverlay] = None
+        self.is_combined = False
+        self._chat_pre_combine_geometry: Optional[str] = None
 
         self.root = tk.Tk()
         self.root.title("Twitch Live Translator")
@@ -300,6 +303,14 @@ class CaptionOverlay:
         self.chat_btn.bind("<ButtonPress-1>", self._toggle_chat_button)
         self.chat_btn.lift()
 
+        # Docks/undocks the chat panel flush against this window (matching
+        # height) so they read as one unit — accent-colored while docked.
+        self.combine_btn = tk.Label(self.root, text="⧉", font=("Segoe UI", 12),
+                                    fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
+        self.combine_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-52)
+        self.combine_btn.bind("<ButtonPress-1>", self._toggle_combine)
+        self.combine_btn.lift()
+
         # Subtle "listening" indicator: lights up while VAD currently sees
         # speech, so there's feedback in the gap between talking and a
         # caption actually landing (which can be a couple seconds).
@@ -327,6 +338,10 @@ class CaptionOverlay:
                 label="Hide chat panel" if visible else "Show chat panel",
                 command=self.chat_overlay.toggle,
             )
+            menu.add_command(
+                label="Separate chat panel" if self.is_combined else "Combine chat panel",
+                command=self._toggle_combine,
+            )
         menu.add_separator()
         menu.add_command(label="Quit", command=self.quit)
         menu.tk_popup(event.x_root, event.y_root)
@@ -345,6 +360,51 @@ class CaptionOverlay:
                 "Remove that flag (or the equivalent setting) and restart to enable it.",
                 parent=self.root,
             )
+
+    def _toggle_combine(self, _event=None):
+        if self.chat_overlay is None:
+            messagebox.showinfo(
+                "Combine",
+                "Chat was disabled with --no-chat for this session — nothing to combine with.",
+                parent=self.root,
+            )
+            return
+        if self.is_combined:
+            self._separate()
+        else:
+            self._combine()
+
+    def _combine(self):
+        """Docks the chat window flush against this one's right edge (or left,
+        if there isn't room on the right), matching its height — a one-time
+        snap, not an ongoing constraint, so either can still be freely moved
+        or resized afterward."""
+        chat = self.chat_overlay
+        if not chat.is_visible():
+            chat.toggle()  # combining implies you want to see it
+        self._chat_pre_combine_geometry = chat.win.geometry()
+
+        self.root.update_idletasks()
+        cx, cy = self.root.winfo_x(), self.root.winfo_y()
+        cw, ch = self.root.winfo_width(), self.root.winfo_height()
+        chat_w = max(CHAT_MIN_W, chat.win.winfo_width())
+
+        user32 = ctypes.windll.user32
+        vx = user32.GetSystemMetrics(SM_XVIRTUALSCREEN)
+        vw = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)
+        new_x = cx + cw if cx + cw + chat_w <= vx + vw else max(vx, cx - chat_w)
+
+        chat.win.geometry(f"{chat_w}x{ch}+{new_x}+{cy}")
+        self.is_combined = True
+        self.combine_btn.configure(fg=COMBINE_ACTIVE_COLOR)
+
+    def _separate(self):
+        chat = self.chat_overlay
+        if self._chat_pre_combine_geometry:
+            chat.win.geometry(_validate_geometry(self._chat_pre_combine_geometry)
+                              or "380x300+1160+400")
+        self.is_combined = False
+        self.combine_btn.configure(fg=CONTROL_COLOR)
 
     def _open_settings(self):
         SettingsDialog(self.root, self)
