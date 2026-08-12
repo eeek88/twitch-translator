@@ -5,6 +5,7 @@ sentencepiece
 numpy
 silero-vad
 py3langid
+lz4
 
 # torch/torchaudio must be installed separately with a matching CUDA build, e.g.:
 #   pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121

@@ -76,9 +76,16 @@ def main():
         if chat_channel is None and args.audio_source == "stream":
             chat_channel = target  # in stream mode the target IS the channel name
         if chat_channel is None:
+            from twitch_translator.firefox_tabs import list_twitch_channels
+            tabs = list_twitch_channels()
+            if len(tabs) == 1:
+                chat_channel = tabs[0]
+                print(f"note: chat channel auto-detected from Firefox tab: {chat_channel}",
+                      file=sys.stderr)
+        if chat_channel is None:
             print(
-                "note: chat panel disabled — pass --chat-channel <channel> to enable it "
-                "in browser mode (the captured process name isn't a Twitch channel)",
+                "note: chat panel disabled — set the chat channel in Settings (… menu) "
+                "or pass --chat-channel <channel>",
                 file=sys.stderr,
             )
 

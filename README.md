@@ -72,8 +72,11 @@ detected are skipped). Chat is read anonymously over Twitch IRC; no login or
 API key needed.
 
 The chat reader needs to know the actual Twitch channel name. In `stream`
-mode it reuses `--target` automatically; in `browser` mode (where the target
-is a process name, not a channel) pass it explicitly:
+mode it reuses `--target` automatically. In `browser` mode (where the target
+is a process name, not a channel) it is detected automatically when exactly
+one Twitch tab is open in Firefox; otherwise pick from the dropdown of open
+Twitch tabs in Settings (… menu) — or type any channel name there — or pass
+it on the command line:
 
 ```
 .venv\Scripts\python main.py --chat-channel <channel_name>

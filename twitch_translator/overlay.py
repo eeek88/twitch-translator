@@ -12,6 +12,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Optional
 
+from .firefox_tabs import list_twitch_channels
 from .pipeline import Caption, ChatLine, Pipeline
 from .settings import SETTING_SPECS, load_settings, save_settings
 
@@ -268,6 +269,8 @@ class SettingsDialog:
         frame = ttk.Frame(self.win, padding=12)
         frame.grid(sticky="nsew")
 
+        twitch_tabs = list_twitch_channels()  # for the chat-channel dropdown
+
         for row, spec in enumerate(SETTING_SPECS):
             ttk.Label(frame, text=spec.label).grid(row=row, column=0, sticky="w", pady=2)
             value = self.current.get(spec.key)
@@ -278,6 +281,12 @@ class SettingsDialog:
                 var = tk.StringVar(value="" if value is None else str(value))
                 ttk.Combobox(frame, textvariable=var, values=spec.choices,
                              state="readonly", width=34).grid(row=row, column=1, sticky="w", padx=8)
+            elif spec.key == "chat_channel":
+                # Editable dropdown pre-filled with Twitch tabs currently open
+                # in Firefox — pick one or type any channel name manually.
+                var = tk.StringVar(value="" if value is None else str(value))
+                ttk.Combobox(frame, textvariable=var, values=twitch_tabs,
+                             width=34).grid(row=row, column=1, sticky="w", padx=8)
             else:
                 var = tk.StringVar(value="" if value is None else str(value))
                 ttk.Entry(frame, textvariable=var, width=36).grid(row=row, column=1, sticky="w", padx=8)
