@@ -302,25 +302,34 @@ class CaptionOverlay:
         self.scrollback.frame.pack(expand=True, fill="both")
 
         # Corner controls float over the text so the full window is text area.
+        # Positioned right-to-left using each widget's own measured width
+        # rather than fixed pixel offsets — glyphs (especially color emoji
+        # like 💬) can render wider than assumed and silently overlap a
+        # fixed-offset neighbor (found live: combine's -52 cut into chat's
+        # left edge because 💬 rendered wider than 24px).
         menu_btn = tk.Label(self.root, text="…", font=("Segoe UI", 13, "bold"),
                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6)
-        menu_btn.place(relx=1.0, rely=0.0, anchor="ne")
         menu_btn.bind("<ButtonPress-1>", self._open_menu)
-        menu_btn.lift()
 
         self.chat_btn = tk.Label(self.root, text="💬", font=("Segoe UI", 12),
                                  fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
-        self.chat_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-28)
         self.chat_btn.bind("<ButtonPress-1>", self._toggle_chat_button)
-        self.chat_btn.lift()
 
         # Docks/undocks the chat panel flush against this window (matching
         # height) so they read as one unit — accent-colored while docked.
         self.combine_btn = tk.Label(self.root, text="⧉", font=("Segoe UI", 12),
                                     fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
-        self.combine_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-52)
         self.combine_btn.bind("<ButtonPress-1>", self._toggle_combine)
-        self.combine_btn.lift()
+
+        self._combine_btn_x = 0  # set below; _poll() reuses it when re-showing the button
+        self.root.update_idletasks()
+        x = 0
+        for widget in (menu_btn, self.chat_btn, self.combine_btn):
+            widget.place(relx=1.0, rely=0.0, anchor="ne", x=-x)
+            widget.lift()
+            if widget is self.combine_btn:
+                self._combine_btn_x = -x
+            x += widget.winfo_reqwidth() + 4
 
         # Subtle "listening" indicator: lights up while VAD currently sees
         # speech, so there's feedback in the gap between talking and a
@@ -464,7 +473,7 @@ class CaptionOverlay:
             visible = self.chat_overlay.is_visible()
             self.chat_btn.configure(fg=ACTIVE_COLOR if visible else CONTROL_COLOR)
             if visible and not self.combine_btn.winfo_ismapped():
-                self.combine_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-52)
+                self.combine_btn.place(relx=1.0, rely=0.0, anchor="ne", x=self._combine_btn_x)
                 self.combine_btn.lift()
             elif not visible and self.combine_btn.winfo_ismapped():
                 self.combine_btn.place_forget()
