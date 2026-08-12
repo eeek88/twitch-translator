@@ -3,8 +3,10 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Iterator
 
@@ -21,8 +23,25 @@ HELPER_EXE = (
 
 
 def _require(binary: str) -> str:
+    # A shell opened before an install won't have the new PATH entries, so don't
+    # rely on PATH alone — also check where our tools actually get installed:
+    # the venv's own Scripts dir (streamlink) and winget's package/link dirs (ffmpeg).
+    candidates = [
+        Path(sys.executable).parent,  # .venv/Scripts
+    ]
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if local_appdata:
+        candidates.append(Path(local_appdata) / "Microsoft" / "WinGet" / "Links")
+        packages = Path(local_appdata) / "Microsoft" / "WinGet" / "Packages"
+        if packages.is_dir():
+            candidates.extend(sorted(packages.glob(f"*/**/bin"))[:20])
+
     path = shutil.which(binary)
     if path is None:
+        for cand in candidates:
+            exe = cand / f"{binary}.exe"
+            if exe.is_file():
+                return str(exe)
         raise RuntimeError(
             f"'{binary}' not found on PATH. If you just installed it, restart your shell."
         )
