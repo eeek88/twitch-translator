@@ -29,7 +29,7 @@ SCROLLBAR_HOVER = "#7a7a7a"   # ...until hovered or dragged
 LISTENING_IDLE_COLOR = "#3a3a3a"   # dim: no speech detected right now
 LISTENING_ACTIVE_COLOR = "#5fd68a"  # soft green: VAD currently sees speech
 TOOLTIP_BG = "#2a2a2a"
-COMBINE_ACTIVE_COLOR = "#7fb8ff"   # same accent as chat usernames: "docked" state
+ACTIVE_COLOR = "#7fb8ff"   # same accent as chat usernames: "on/docked" state for toggle buttons
 WINDOW_ALPHA = 0.82
 HISTORY_LINES = 300
 MIN_FONT_SIZE, MAX_FONT_SIZE = 8, 48
@@ -408,7 +408,7 @@ class CaptionOverlay:
 
         chat.win.geometry(f"{chat_w}x{ch}+{new_x}+{cy}")
         self.is_combined = True
-        self.combine_btn.configure(fg=COMBINE_ACTIVE_COLOR)
+        self.combine_btn.configure(fg=ACTIVE_COLOR)
 
     def _separate(self):
         chat = self.chat_overlay
@@ -456,6 +456,18 @@ class CaptionOverlay:
             speaking = self.pipeline.vad.is_speaking
             self.listening_dot.configure(
                 fg=LISTENING_ACTIVE_COLOR if speaking else LISTENING_IDLE_COLOR)
+        if self.chat_overlay is not None:
+            # Polled rather than hooked into every place chat visibility can
+            # change (the 💬 button, the … menu, Settings, _combine()'s
+            # auto-show) — simpler than threading a callback through all of
+            # them, and self-correcting if anything else toggles it.
+            visible = self.chat_overlay.is_visible()
+            self.chat_btn.configure(fg=ACTIVE_COLOR if visible else CONTROL_COLOR)
+            if visible and not self.combine_btn.winfo_ismapped():
+                self.combine_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-52)
+                self.combine_btn.lift()
+            elif not visible and self.combine_btn.winfo_ismapped():
+                self.combine_btn.place_forget()
         self.root.after(self.poll_ms, self._poll)
 
     def attach_chat(self, chat_queue: "queue.Queue[ChatLine]",
