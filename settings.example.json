@@ -13,5 +13,6 @@
   "chat_channel": null,
   "chat_queue_maxsize": 50,
   "caption_geometry": null,
-  "chat_geometry": null
+  "chat_geometry": null,
+  "glossary": ""
 }

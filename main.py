@@ -40,6 +40,8 @@ def parse_args():
                     help=f"inference device (default: {s['device']})")
     p.add_argument("--target-lang", default=s["target_lang"],
                     help=f"NLLB target language code (default: {s['target_lang']})")
+    p.add_argument("--glossary", default=s["glossary"],
+                    help="comma-separated names/jargon the streamer says often, fed to Whisper as context")
     p.add_argument("--vad-threshold", type=float, default=s["vad_threshold"],
                     help=f"speech probability threshold, 0-1 (default: {s['vad_threshold']})")
     p.add_argument("--vad-min-silence-ms", type=int, default=s["vad_min_silence_ms"],
@@ -102,6 +104,7 @@ def main():
         vad_max_speech_ms=args.vad_max_speech_ms,
         chat_channel=chat_channel,
         chat_queue_maxsize=args.chat_queue_maxsize,
+        glossary=args.glossary or "",
     )
     pipeline.start()
 

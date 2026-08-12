@@ -101,6 +101,7 @@ run only:
 --translation-model TEXT     NLLB-200 checkpoint (huggingface repo id)
 --device {cuda,cpu}
 --target-lang TEXT           NLLB target language code
+--glossary TEXT              comma-separated names/jargon the streamer says often
 --vad-threshold FLOAT        speech probability threshold, 0-1
 --vad-min-silence-ms INT     silence gap that ends an utterance
 --vad-min-speech-ms INT      utterances shorter than this are discarded as noise
@@ -122,6 +123,12 @@ run only:
   cutoffs, which matters most for verb-final/high-context languages like
   Japanese where cutting before the sentence's end can flip the meaning. The
   cost is added latency, since the VAD waits longer to confirm a pause is real.
+- `glossary`: names/jargon that come up often on the stream (game titles,
+  the streamer's name, recurring slang) — fed to Whisper as prior context on
+  every utterance, alongside the last few transcripts. This targets a
+  specific failure mode: Whisper mishearing recurring proper nouns
+  differently each time (e.g. a controller brand becoming a different
+  garbled word every few sentences). It does not fix one-off misheard words.
 
 **Fallback backend** — if browser capture ever proves unreliable (Firefox not
 open, capture helper failing), pull audio directly from Twitch's servers

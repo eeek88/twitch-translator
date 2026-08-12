@@ -17,6 +17,7 @@ DEFAULTS: dict[str, Any] = {
     "translation_model": "facebook/nllb-200-distilled-1.3B",
     "device": "cuda",                # "cuda" or "cpu"
     "target_lang": "eng_Latn",       # NLLB target language code
+    "glossary": "",                  # names/jargon fed to Whisper as context, e.g. "Joy-Con, ProCon, Splatoon"
     "vad_threshold": 0.5,
     "vad_min_silence_ms": 800,       # silence gap that ends an utterance
     "vad_min_speech_ms": 300,        # utterances shorter than this are discarded as noise
@@ -58,6 +59,8 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="cuda needs an NVIDIA GPU"),
     SettingSpec("target_lang", "Target language", "text",
                 help="NLLB code, e.g. eng_Latn, spa_Latn, jpn_Jpan"),
+    SettingSpec("glossary", "Glossary", "text",
+                help="comma-separated names/jargon the streamer says often — helps Whisper hear them right"),
     SettingSpec("vad_threshold", "VAD speech threshold", "float",
                 help="0-1; higher = stricter about what counts as speech"),
     SettingSpec("vad_min_silence_ms", "VAD silence gap (ms)", "int",

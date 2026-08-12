@@ -70,6 +70,7 @@ class Pipeline:
         vad_max_speech_ms: int = 12000,
         chat_channel: Optional[str] = None,
         chat_queue_maxsize: int = 50,
+        glossary: str = "",
     ):
         self.audio_source = audio_source
         self.target = target
@@ -82,7 +83,7 @@ class Pipeline:
             min_speech_ms=vad_min_speech_ms,
             max_speech_ms=vad_max_speech_ms,
         )
-        self.asr = ASR(model_size=model_size, device=device)
+        self.asr = ASR(model_size=model_size, device=device, glossary=glossary)
         self.translator = Translator(model_name=translation_model, device=device)
 
         self._utterance_queue: "queue.Queue[object]" = queue.Queue()
