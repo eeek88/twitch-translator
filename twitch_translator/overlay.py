@@ -7,7 +7,9 @@ scroll up to read, scroll back to the bottom to resume auto-following.
 """
 from __future__ import annotations
 
+import ctypes
 import queue
+import re
 import time
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -29,6 +31,32 @@ HISTORY_LINES = 300
 
 CAPTION_MIN_W, CAPTION_MIN_H = 300, 80
 CHAT_MIN_W, CHAT_MIN_H = 200, 120
+
+
+_GEOMETRY_RE = re.compile(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)")
+
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN = 76, 77
+SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 78, 79
+
+
+def _validate_geometry(geometry: Optional[str]) -> Optional[str]:
+    """Reject a saved geometry whose position isn't on any currently attached
+    monitor (e.g. a monitor got disconnected/rearranged since last save) — a
+    window placed there is invisible with no way back to it, so fall back to
+    the default instead. Uses the full virtual screen (spans all monitors),
+    since Tkinter's own screen-size queries only see the primary one."""
+    if not geometry:
+        return None
+    m = _GEOMETRY_RE.match(geometry)
+    if not m:
+        return None
+    x, y = int(m.group(3)), int(m.group(4))
+    user32 = ctypes.windll.user32
+    vx, vy = user32.GetSystemMetrics(SM_XVIRTUALSCREEN), user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+    vw, vh = user32.GetSystemMetrics(SM_CXVIRTUALSCREEN), user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+    if vx <= x < vx + vw and vy <= y < vy + vh:
+        return geometry
+    return None
 
 
 def _make_draggable(win: tk.Misc, *widgets: tk.Misc):
@@ -151,7 +179,7 @@ class CaptionOverlay:
         self.root.attributes("-topmost", True)
         self.root.attributes("-alpha", WINDOW_ALPHA)
         self.root.configure(bg=BG_COLOR)
-        self.root.geometry(geometry or "900x160+180+760")
+        self.root.geometry(_validate_geometry(geometry) or "900x160+180+760")
         self.root.minsize(CAPTION_MIN_W, CAPTION_MIN_H)
 
         self.scrollback = _ScrollbackText(self.root, ("Segoe UI", 18, "bold"))
@@ -163,6 +191,12 @@ class CaptionOverlay:
         menu_btn.place(relx=1.0, rely=0.0, anchor="ne")
         menu_btn.bind("<ButtonPress-1>", self._open_menu)
         menu_btn.lift()
+
+        self.chat_btn = tk.Label(self.root, text="💬", font=("Segoe UI", 12),
+                                 fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
+        self.chat_btn.place(relx=1.0, rely=0.0, anchor="ne", x=-28)
+        self.chat_btn.bind("<ButtonPress-1>", self._toggle_chat_button)
+        self.chat_btn.lift()
 
         grip = _make_resize_grip(self.root, CAPTION_MIN_W, CAPTION_MIN_H)
         grip.place(relx=1.0, rely=1.0, anchor="se")
@@ -187,6 +221,21 @@ class CaptionOverlay:
         menu.add_command(label="Quit", command=self.quit)
         menu.tk_popup(event.x_root, event.y_root)
         return "break"
+
+    def _toggle_chat_button(self, _event=None):
+        if self.chat_overlay is not None:
+            self.chat_overlay.toggle()
+        else:
+            # Chat never started this session (no channel was configured at
+            # launch) — a hide/show toggle has nothing to act on. Point at the
+            # actual fix instead of silently doing nothing.
+            messagebox.showinfo(
+                "Chat panel",
+                "Chat isn't running this session — no channel was set when the "
+                "app started.\n\nSet one in Settings… (chat_channel), then restart "
+                "the app to enable it.",
+                parent=self.root,
+            )
 
     def _open_settings(self):
         SettingsDialog(self.root, self)
@@ -242,7 +291,7 @@ class ChatOverlay:
         self.win.attributes("-topmost", True)
         self.win.attributes("-alpha", WINDOW_ALPHA)
         self.win.configure(bg=BG_COLOR)
-        self.win.geometry(geometry or "380x300+1160+400")
+        self.win.geometry(_validate_geometry(geometry) or "380x300+1160+400")
         self.win.minsize(CHAT_MIN_W, CHAT_MIN_H)
 
         self.scrollback = _ScrollbackText(self.win, ("Segoe UI", 11))

@@ -8,11 +8,54 @@ any field can be overridden per-run with the matching CLI flag below.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import sys
+from pathlib import Path
 
 from twitch_translator.overlay import CaptionOverlay
 from twitch_translator.pipeline import Pipeline
 from twitch_translator.settings import load_settings
+
+LOG_PATH = Path(__file__).resolve().parent / "logs" / "latest.log"
+
+
+class _Tee:
+    """Writes to multiple streams — lets the console show output during
+    startup while a log file also keeps it after the console is hidden.
+    Falls back to UTF-8 bytes on a stream whose codec can't encode the text
+    (Windows consoles often default to a non-UTF-8 codepage, e.g. cp1252/850,
+    which chokes on Japanese/etc. — write raw encoded bytes to that stream's
+    buffer instead of failing the whole write)."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            try:
+                s.write(data)
+            except UnicodeEncodeError:
+                buf = getattr(s, "buffer", None)
+                if buf is not None:
+                    buf.write(data.encode("utf-8", errors="replace"))
+        return len(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+
+def _tee_output_to_log():
+    LOG_PATH.parent.mkdir(exist_ok=True)
+    log_file = open(LOG_PATH, "w", encoding="utf-8", errors="replace")
+    sys.stdout = _Tee(sys.stdout, log_file)
+    sys.stderr = _Tee(sys.stderr, log_file)
+
+
+def _set_console_visible(visible: bool):
+    hwnd = ctypes.windll.kernel32.GetConsoleWindow()
+    if hwnd:
+        ctypes.windll.user32.ShowWindow(hwnd, 5 if visible else 0)  # SW_SHOW / SW_HIDE
 
 
 def parse_args():
@@ -62,6 +105,7 @@ def parse_args():
 
 
 def main():
+    _tee_output_to_log()
     args = parse_args()
 
     target = args.target
@@ -113,8 +157,18 @@ def main():
                              geometry=s["caption_geometry"])
     if chat_channel:
         overlay.attach_chat(pipeline.chat_out_queue, geometry=s["chat_geometry"])
+
+    # The windows are already showing by this point (Tk maps them on creation,
+    # not on mainloop) — safe to hide the console now that we've "booted up".
+    # Full output still goes to logs/latest.log if something needs checking later.
+    print("Ready — hiding this console. Check logs/latest.log if something looks wrong.",
+          file=sys.stderr)
+    _set_console_visible(False)
     try:
         overlay.run()
+    except Exception:
+        _set_console_visible(True)  # surface crashes rather than failing silently hidden
+        raise
     finally:
         pipeline.stop()
 

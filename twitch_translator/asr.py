@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import difflib
+import re
 from collections import deque
 
 import numpy as np
@@ -10,6 +11,12 @@ from faster_whisper import WhisperModel
 CONTEXT_UTTERANCES = 3           # recent transcripts fed back as context
 MAX_PROMPT_CHARS = 600           # whisper's prompt window is ~224 tokens; stay well under
 HALLUCINATION_SIMILARITY = 0.75  # text this close to the glossary is a prompt echo, not speech
+
+# Whisper's well-known "repetition loop" failure: on unclear/noisy audio it can
+# get stuck re-emitting the same phrase (seen live: "its like a research
+# project," dozens of times in a row). Any substring of 4+ chars repeating 3+
+# times back-to-back is that failure, not real transcribed speech.
+_REPETITION_RE = re.compile(r"(.{4,}?)\1{2,}")
 
 
 class ASR:
@@ -49,6 +56,11 @@ class ASR:
         if self.glossary and text and difflib.SequenceMatcher(
             None, text.lower(), self.glossary.lower()
         ).ratio() > HALLUCINATION_SIMILARITY:
+            return "", info.language
+        # Discard the whole utterance rather than trimming to one repeat: a
+        # repetition loop is a strong signal the model was never confident
+        # about this audio in the first place, not just padding a real answer.
+        if text and _REPETITION_RE.search(text):
             return "", info.language
         if text:
             if info.language != self._recent_lang:

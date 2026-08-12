@@ -51,8 +51,9 @@ class ChatLine:
 
 
 def _log(line: str) -> None:
-    sys.stderr.buffer.write((line + "\n").encode("utf-8", errors="replace"))
-    sys.stderr.flush()
+    # main.py's console/log Tee handles non-UTF-8-console fallback centrally;
+    # a plain write here works whether stderr is the real console or that Tee.
+    print(line, file=sys.stderr)
 
 
 class Pipeline:

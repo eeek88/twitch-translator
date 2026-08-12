@@ -15,3 +15,6 @@ settings.json
 
 # Local tool state
 .claude/
+
+# Runtime log (written fresh each launch, console output mirrors here)
+logs/
