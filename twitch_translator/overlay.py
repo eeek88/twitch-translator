@@ -64,7 +64,13 @@ def _validate_geometry(geometry: Optional[str]) -> Optional[str]:
     return None
 
 
-def _make_draggable(win: tk.Misc, *widgets: tk.Misc):
+def _make_draggable(win: tk.Misc, *widgets: tk.Misc,
+                    companion: Optional[Callable[[], Optional[tk.Misc]]] = None):
+    """companion, if given, is called on every drag step; when it returns a
+    window (rather than None), that window is moved by the same delta as win
+    — used so combined caption/chat windows drag as one unit. It's checked
+    live rather than fixed at bind time, so combine/separate can toggle this
+    without re-binding anything."""
     state = {"dx": 0, "dy": 0}
 
     def start(event):
@@ -73,7 +79,12 @@ def _make_draggable(win: tk.Misc, *widgets: tk.Misc):
         return "break"
 
     def move(event):
-        win.geometry(f"+{event.x_root - state['dx']}+{event.y_root - state['dy']}")
+        new_x, new_y = event.x_root - state["dx"], event.y_root - state["dy"]
+        other = companion() if companion else None
+        if other is not None:
+            dx, dy = new_x - win.winfo_x(), new_y - win.winfo_y()
+            other.geometry(f"+{other.winfo_x() + dx}+{other.winfo_y() + dy}")
+        win.geometry(f"+{new_x}+{new_y}")
         return "break"
 
     for w in widgets:
@@ -323,7 +334,8 @@ class CaptionOverlay:
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.lift()
 
-        _make_draggable(self.root, self.root, self.scrollback.text)
+        _make_draggable(self.root, self.root, self.scrollback.text,
+                        companion=self._combined_chat_window)
         self.root.bind("<Escape>", lambda _e: self.quit())
         self.root.after(self.poll_ms, self._poll)
 
@@ -406,6 +418,13 @@ class CaptionOverlay:
         self.is_combined = False
         self.combine_btn.configure(fg=CONTROL_COLOR)
 
+    def _combined_chat_window(self) -> Optional[tk.Misc]:
+        """companion callable for _make_draggable: while combined, dragging
+        the caption window drags the chat window along with it."""
+        if self.is_combined and self.chat_overlay is not None and self.chat_overlay.is_visible():
+            return self.chat_overlay.win
+        return None
+
     def _open_settings(self):
         SettingsDialog(self.root, self)
 
@@ -442,7 +461,7 @@ class CaptionOverlay:
     def attach_chat(self, chat_queue: "queue.Queue[ChatLine]",
                     geometry: Optional[str] = None):
         self.chat_overlay = ChatOverlay(self.root, chat_queue, self.poll_ms,
-                                        self.pipeline, geometry)
+                                        self.pipeline, geometry, caption_overlay=self)
 
     def run(self):
         self.root.mainloop()
@@ -454,10 +473,12 @@ class ChatOverlay:
 
     def __init__(self, parent: tk.Tk, chat_queue: "queue.Queue[ChatLine]",
                  poll_ms: int, pipeline: Optional[Pipeline],
-                 geometry: Optional[str] = None):
+                 geometry: Optional[str] = None,
+                 caption_overlay: Optional["CaptionOverlay"] = None):
         self.chat_queue = chat_queue
         self.poll_ms = poll_ms
         self.pipeline = pipeline
+        self.caption_overlay = caption_overlay
 
         self.win = tk.Toplevel(parent)
         self.win.title("Translated Chat")
@@ -504,8 +525,16 @@ class ChatOverlay:
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.lift()
 
-        _make_draggable(self.win, self.win, top_bar, self.scrollback.text)
+        _make_draggable(self.win, self.win, top_bar, self.scrollback.text,
+                        companion=self._combined_caption_window)
         self.win.after(self.poll_ms, self._poll)
+
+    def _combined_caption_window(self) -> Optional[tk.Misc]:
+        """companion callable for _make_draggable: while combined, dragging
+        the chat window drags the caption window along with it."""
+        if self.caption_overlay is not None and self.caption_overlay.is_combined:
+            return self.caption_overlay.root
+        return None
 
     def _on_font_size_change(self, size: int):
         # "name" (the bold username prefix) isn't the base font, so it needs
