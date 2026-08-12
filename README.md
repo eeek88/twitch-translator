@@ -52,8 +52,16 @@ By default this captures Firefox's own audio (synced to what you see, and
 immune to other sounds on your PC — Discord, music, etc. — since it targets
 only the Firefox process).
 
-Drag the caption bar wherever you like. Press **Escape** with the caption
-window focused to quit.
+Drag either window to move it; drag the **⇲** grip in its bottom-right corner
+to resize. Both windows keep a scrollback history — scroll up with the mouse
+wheel to re-read earlier translations, scroll back to the bottom to resume
+following live. Window positions and sizes are remembered between launches.
+
+Click the **…** at the top-right of the caption bar for the menu: open the
+in-app **Settings** dialog (every option below, editable with a GUI — including
+the chat channel name), show/hide the chat panel, or quit. Press **Escape**
+with the caption window focused to quit. The chat panel's **✕** hides it;
+hiding it also pauses chat translation so it costs no GPU time.
 
 ### Translated chat panel
 
@@ -77,9 +85,10 @@ are dropped rather than queued up stale.
 
 ### Settings
 
-Defaults live in `settings.json` at the project root — edit it directly to change
-your usual setup. Any field can also be overridden per-run with the matching CLI
-flag, which takes precedence for that run only:
+Defaults live in `settings.json` at the project root — edit them from the
+in-app Settings dialog (… menu) or directly in the file. Any field can also be
+overridden per-run with the matching CLI flag, which takes precedence for that
+run only:
 
 ```
 --audio-source {browser,stream}
@@ -95,7 +104,6 @@ flag, which takes precedence for that run only:
 --vad-max-speech-ms INT      utterances longer than this are cut off
 --no-chat                    disable the translated-chat panel
 --chat-channel TEXT          channel whose chat to translate (see chat section)
---chat-max-messages INT      lines kept visible in the chat panel
 --chat-queue-maxsize INT     pending chat translations before new ones drop
 ```
 

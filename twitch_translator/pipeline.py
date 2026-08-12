@@ -90,7 +90,22 @@ class Pipeline:
         self.caption_queue: "queue.Queue[object]" = queue.Queue()
         self.chat_out_queue: "queue.Queue[ChatLine]" = queue.Queue()
         self._stop = threading.Event()
+        self._chat_enabled = threading.Event()
+        self._chat_enabled.set()
         self._threads: list[threading.Thread] = []
+
+    def set_chat_enabled(self, enabled: bool) -> None:
+        """Pause/resume chat translation at runtime (e.g. when the panel is hidden).
+        Paused chat consumes no GPU time; pending messages are discarded."""
+        if enabled:
+            self._chat_enabled.set()
+        else:
+            self._chat_enabled.clear()
+            while True:  # stale messages shouldn't appear when re-enabled later
+                try:
+                    self._chat_in_queue.get_nowait()
+                except queue.Empty:
+                    break
 
     def _capture_and_segment(self):
         # Capture backends fail transiently (stream buffering, Firefox not yet open,
@@ -134,6 +149,8 @@ class Pipeline:
                     if self._stop.is_set():
                         return
                     backoff = 2.0
+                    if not self._chat_enabled.is_set():
+                        continue  # panel hidden: keep the socket alive but do no work
                     # Emote-spam and symbol-only messages translate to garbage.
                     if not any(ch.isalpha() for ch in message):
                         continue
@@ -177,6 +194,8 @@ class Pipeline:
                 self.caption_queue.put(Caption.status(f"[transcription error: {exc}]"))
 
     def _translate_pending_chat(self):
+        if not self._chat_enabled.is_set():
+            return
         try:
             username, lang, message = self._chat_in_queue.get_nowait()
         except queue.Empty:

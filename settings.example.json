@@ -11,6 +11,7 @@
   "vad_max_speech_ms": 12000,
   "enable_chat": true,
   "chat_channel": null,
-  "chat_max_messages": 15,
-  "chat_queue_maxsize": 50
+  "chat_queue_maxsize": 50,
+  "caption_geometry": null,
+  "chat_geometry": null
 }

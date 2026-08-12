@@ -54,8 +54,6 @@ def parse_args():
     p.add_argument("--chat-channel", default=s["chat_channel"],
                     help="Twitch channel whose chat to translate. Defaults to --target in stream mode; "
                          "required for chat in browser mode (the process name isn't a channel).")
-    p.add_argument("--chat-max-messages", type=int, default=s["chat_max_messages"],
-                    help=f"lines kept visible in the chat panel (default: {s['chat_max_messages']})")
     p.add_argument("--chat-queue-maxsize", type=int, default=s["chat_queue_maxsize"],
                     help=f"pending chat translations before new ones are dropped (default: {s['chat_queue_maxsize']})")
     return p.parse_args()
@@ -100,9 +98,11 @@ def main():
     )
     pipeline.start()
 
-    overlay = CaptionOverlay(pipeline.caption_queue)
+    s = load_settings()
+    overlay = CaptionOverlay(pipeline.caption_queue, pipeline=pipeline,
+                             geometry=s["caption_geometry"])
     if chat_channel:
-        overlay.attach_chat(pipeline.chat_out_queue, args.chat_max_messages)
+        overlay.attach_chat(pipeline.chat_out_queue, geometry=s["chat_geometry"])
     try:
         overlay.run()
     finally:
