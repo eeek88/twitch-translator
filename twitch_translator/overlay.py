@@ -139,6 +139,37 @@ def _thin_scrollbar_style() -> str:
     return "Thin.Vertical.TScrollbar"
 
 
+_DARK_COMBOBOX_STYLE_READY = False
+
+
+def _dark_combobox_style() -> str:
+    """Dark-themed dropdown matching the rest of the UI — ttk widgets ignore
+    plain tk bg/fg options, so this needs its own style (same approach as
+    the scrollbar above; both rely on the 'clam' theme already activated
+    there, since it's the one that actually honors these overrides)."""
+    global _DARK_COMBOBOX_STYLE_READY
+    style = ttk.Style()
+    if not _DARK_COMBOBOX_STYLE_READY:
+        style.theme_use("clam")
+        style.configure("Dark.TCombobox",
+                        fieldbackground=BG_COLOR, background=BG_COLOR,
+                        foreground=FG_COLOR, arrowcolor=CONTROL_COLOR,
+                        bordercolor=CONTROL_COLOR, lightcolor=BG_COLOR,
+                        darkcolor=BG_COLOR, borderwidth=1, relief="flat")
+        style.map("Dark.TCombobox",
+                  fieldbackground=[("readonly", BG_COLOR)],
+                  foreground=[("readonly", FG_COLOR)],
+                  bordercolor=[("focus", ACTIVE_COLOR)])
+        # The dropdown listbox itself isn't a ttk widget — it's styled via
+        # option database entries, the only way Tk exposes it.
+        style.master.option_add("*TCombobox*Listbox.background", BG_COLOR)
+        style.master.option_add("*TCombobox*Listbox.foreground", FG_COLOR)
+        style.master.option_add("*TCombobox*Listbox.selectBackground", ACTIVE_COLOR)
+        style.master.option_add("*TCombobox*Listbox.selectForeground", BG_COLOR)
+        _DARK_COMBOBOX_STYLE_READY = True
+    return "Dark.TCombobox"
+
+
 class _ScrollbackText:
     """A read-only, wheel-scrollable Text with a thin drag scrollbar and a dim
     timestamp on every line. Auto-follows only while the view is at the
@@ -435,7 +466,7 @@ class CaptionOverlay:
         return None
 
     def _open_settings(self):
-        SettingsDialog(self.root, self)
+        SettingsPanel(self.root, self)
 
     def quit(self):
         # Remember where the user put the windows for next launch.
@@ -604,57 +635,139 @@ class ChatOverlay:
         self.win.after(self.poll_ms, self._poll)
 
 
-class SettingsDialog:
-    """All settings from SETTING_SPECS, editable, saved to settings.json.
-    Live-safe settings apply immediately; the rest take effect on restart."""
+class SettingsPanel:
+    """Dark-themed settings panel docked against the caption window — same
+    visual language as the rest of the app (CaptionOverlay/ChatOverlay), not
+    a generic OS-styled dialog. Shows only the most commonly-changed
+    settings by default; "Advanced" reveals the rest. Docks directly below
+    the caption window (not left/right) so it doesn't collide with a chat
+    window docked there via CaptionOverlay._combine()."""
 
-    def __init__(self, parent: tk.Tk, overlay: CaptionOverlay):
+    WIDTH = 440
+
+    def __init__(self, parent: tk.Tk, overlay: "CaptionOverlay"):
         self.overlay = overlay
         self.current = load_settings()
         self.vars: dict[str, tk.Variable] = {}
+        self.show_advanced = False
 
         self.win = tk.Toplevel(parent)
-        self.win.title("Settings — Twitch Live Translator")
+        self.win.title("Settings")
+        self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.resizable(False, False)
+        self.win.attributes("-alpha", WINDOW_ALPHA)
+        self.win.configure(bg=BG_COLOR)
 
-        frame = ttk.Frame(self.win, padding=12)
-        frame.grid(sticky="nsew")
+        header = tk.Frame(self.win, bg=BG_COLOR)
+        header.pack(side="top", fill="x")
+        tk.Label(header, text="Settings", font=("Segoe UI", 11, "bold"),
+                fg=FG_COLOR, bg=BG_COLOR, padx=10, pady=8).pack(side="left")
 
-        twitch_tabs = list_twitch_channels()  # for the chat-channel dropdown
+        close_btn = tk.Label(header, text="✕", font=("Segoe UI", 11),
+                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=8)
+        close_btn.pack(side="right")
+        close_btn.bind("<ButtonPress-1>", lambda _e: self.win.destroy())
 
-        for row, spec in enumerate(SETTING_SPECS):
-            ttk.Label(frame, text=spec.label).grid(row=row, column=0, sticky="w", pady=2)
+        self.advanced_btn = tk.Label(header, text="Advanced", font=("Segoe UI", 9),
+                                     fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=8)
+        self.advanced_btn.pack(side="right")
+        self.advanced_btn.bind("<ButtonPress-1>", self._toggle_advanced)
+
+        _make_draggable(self.win, header)
+
+        self.rows_frame = tk.Frame(self.win, bg=BG_COLOR)
+        self.rows_frame.pack(side="top", fill="both", expand=True, padx=12, pady=(2, 8))
+
+        footer = tk.Frame(self.win, bg=BG_COLOR)
+        footer.pack(side="bottom", fill="x", padx=12, pady=(0, 10))
+        save_btn = tk.Label(footer, text="Save", font=("Segoe UI", 9, "bold"),
+                            fg=ACTIVE_COLOR, bg=BG_COLOR, cursor="hand2", padx=10, pady=4)
+        save_btn.pack(side="right")
+        save_btn.bind("<ButtonPress-1>", lambda _e: self._save())
+        cancel_btn = tk.Label(footer, text="Cancel", font=("Segoe UI", 9),
+                              fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=10, pady=4)
+        cancel_btn.pack(side="right")
+        cancel_btn.bind("<ButtonPress-1>", lambda _e: self.win.destroy())
+
+        self._build_rows()
+        self._position()
+
+    # --- layout ---------------------------------------------------------
+
+    def _visible_specs(self):
+        return [s for s in SETTING_SPECS if self.show_advanced or not s.advanced]
+
+    def _build_rows(self):
+        for child in self.rows_frame.winfo_children():
+            child.destroy()
+        self.vars.clear()
+
+        combo_style = _dark_combobox_style()
+        for row, spec in enumerate(self._visible_specs()):
+            tk.Label(self.rows_frame, text=spec.label, font=("Segoe UI", 9),
+                    fg=FG_COLOR, bg=BG_COLOR, anchor="w").grid(
+                row=row, column=0, sticky="w", pady=3)
             value = self.current.get(spec.key)
+
             if spec.kind == "bool":
                 var: tk.Variable = tk.BooleanVar(value=bool(value))
-                ttk.Checkbutton(frame, variable=var).grid(row=row, column=1, sticky="w", padx=8)
+                tk.Checkbutton(self.rows_frame, variable=var, bg=BG_COLOR,
+                              activebackground=BG_COLOR, selectcolor=BG_COLOR,
+                              highlightthickness=0, bd=0).grid(
+                    row=row, column=1, sticky="w", padx=8)
             elif spec.kind == "choice":
                 var = tk.StringVar(value="" if value is None else str(value))
-                ttk.Combobox(frame, textvariable=var, values=spec.choices,
-                             state="readonly", width=34).grid(row=row, column=1, sticky="w", padx=8)
-            elif spec.key == "chat_channel":
-                # Editable dropdown pre-filled with Twitch tabs currently open
-                # in Firefox — pick one or type any channel name manually.
-                var = tk.StringVar(value="" if value is None else str(value))
-                ttk.Combobox(frame, textvariable=var, values=twitch_tabs,
-                             width=34).grid(row=row, column=1, sticky="w", padx=8)
+                ttk.Combobox(self.rows_frame, textvariable=var, values=spec.choices,
+                            state="readonly", style=combo_style, width=28).grid(
+                    row=row, column=1, sticky="w", padx=8)
             else:
                 var = tk.StringVar(value="" if value is None else str(value))
-                ttk.Entry(frame, textvariable=var, width=36).grid(row=row, column=1, sticky="w", padx=8)
+                tk.Entry(self.rows_frame, textvariable=var, width=30,
+                        bg=BG_COLOR, fg=FG_COLOR, insertbackground=FG_COLOR,
+                        relief="flat", highlightthickness=1,
+                        highlightbackground=CONTROL_COLOR,
+                        highlightcolor=ACTIVE_COLOR).grid(
+                    row=row, column=1, sticky="w", padx=8)
             self.vars[spec.key] = var
-            if spec.help:
-                ttk.Label(frame, text=spec.help, foreground="#777777",
-                          font=("Segoe UI", 8)).grid(row=row, column=2, sticky="w", padx=4)
 
-        buttons = ttk.Frame(frame)
-        buttons.grid(row=len(SETTING_SPECS), column=0, columnspan=3, pady=(12, 0), sticky="e")
-        ttk.Button(buttons, text="Cancel", command=self.win.destroy).pack(side="right", padx=4)
-        ttk.Button(buttons, text="Save", command=self._save).pack(side="right")
+            if spec.help:
+                tk.Label(self.rows_frame, text=spec.help, font=("Segoe UI", 8),
+                        fg=TIMESTAMP_COLOR, bg=BG_COLOR, anchor="w",
+                        wraplength=140, justify="left").grid(
+                    row=row, column=2, sticky="w", padx=4)
+
+        self.advanced_btn.configure(
+            fg=ACTIVE_COLOR if self.show_advanced else CONTROL_COLOR)
+
+    def _toggle_advanced(self, _event=None):
+        self.show_advanced = not self.show_advanced
+        self._build_rows()
+        self.win.update_idletasks()
+        self.win.geometry(f"{self.WIDTH}x{self.win.winfo_reqheight()}")
+
+    def _position(self):
+        """Docks flush below the caption window; above it instead if there
+        isn't room below (same virtual-screen-bounds check _combine() uses)."""
+        parent = self.overlay.root
+        parent.update_idletasks()
+        self.win.update_idletasks()
+        px, py = parent.winfo_x(), parent.winfo_y()
+        pw, ph = parent.winfo_width(), parent.winfo_height()
+        panel_h = self.win.winfo_reqheight()
+
+        user32 = ctypes.windll.user32
+        vy = user32.GetSystemMetrics(SM_YVIRTUALSCREEN)
+        vh = user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)
+        y = py + ph if py + ph + panel_h <= vy + vh else max(vy, py - panel_h)
+        self.win.geometry(f"{self.WIDTH}x{panel_h}+{px}+{y}")
+
+    # --- save -------------------------------------------------------------
 
     def _save(self):
         updates: dict = {}
         for spec in SETTING_SPECS:
+            if spec.key not in self.vars:
+                continue  # hidden behind Advanced and never touched
             raw = self.vars[spec.key].get()
             if spec.kind == "bool":
                 value: object = bool(raw)

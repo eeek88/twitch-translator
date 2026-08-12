@@ -39,10 +39,11 @@ class SettingSpec:
     kind: str                        # "choice" | "bool" | "int" | "float" | "text"
     choices: Optional[list] = None
     live: bool = False               # can apply without restarting the app
+    advanced: bool = False           # hidden behind the settings panel's "Advanced" toggle
     help: str = ""
 
 
-# Drives the in-app settings dialog: one row per user-facing setting.
+# Drives the in-app settings panel: one row per user-facing setting.
 # Geometry keys are managed automatically and intentionally not listed.
 SETTING_SPECS: list[SettingSpec] = [
     SettingSpec("audio_source", "Audio source", "choice", ["browser", "stream"],
@@ -63,24 +64,25 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="NLLB code, e.g. eng_Latn, spa_Latn, jpn_Jpan"),
     SettingSpec("glossary", "Glossary", "text",
                 help="comma-separated names/jargon the streamer says often — helps Whisper hear them right"),
-    SettingSpec("vad_threshold", "VAD speech threshold", "float",
-                help="0-1; higher = stricter about what counts as speech"),
-    SettingSpec("vad_min_silence_ms", "VAD silence gap (ms)", "int",
-                help="pause length that ends a sentence; higher = fewer mid-sentence cuts, more lag"),
-    SettingSpec("vad_min_speech_ms", "VAD min speech (ms)", "int",
-                help="shorter utterances are ignored as noise"),
-    SettingSpec("vad_max_speech_ms", "VAD max speech (ms)", "int",
-                help="utterances are cut at this length to bound latency"),
     SettingSpec("enable_chat", "Chat panel", "bool", live=True,
                 help="show translated chat messages in a second window"),
-    SettingSpec("chat_channel", "Chat channel", "text", live=True,
-                help="Twitch channel whose chat to translate (also editable directly on the chat panel)"),
-    SettingSpec("chat_queue_maxsize", "Chat queue size", "int",
-                help="pending chat translations before new ones are dropped"),
     SettingSpec("caption_font_size", "Caption font size", "int", live=True,
                 help="also adjustable with Ctrl+scroll directly on the caption window"),
     SettingSpec("chat_font_size", "Chat font size", "int", live=True,
                 help="also adjustable with Ctrl+scroll directly on the chat window"),
+    # --- advanced: fine-tuning knobs, touched far less often ---
+    SettingSpec("chat_channel", "Chat channel", "text", live=True, advanced=True,
+                help="also (and better) editable directly on the chat panel, with tab detection"),
+    SettingSpec("vad_threshold", "VAD speech threshold", "float", advanced=True,
+                help="0-1; higher = stricter about what counts as speech"),
+    SettingSpec("vad_min_silence_ms", "VAD silence gap (ms)", "int", advanced=True,
+                help="pause length that ends a sentence; higher = fewer mid-sentence cuts, more lag"),
+    SettingSpec("vad_min_speech_ms", "VAD min speech (ms)", "int", advanced=True,
+                help="shorter utterances are ignored as noise"),
+    SettingSpec("vad_max_speech_ms", "VAD max speech (ms)", "int", advanced=True,
+                help="utterances are cut at this length to bound latency"),
+    SettingSpec("chat_queue_maxsize", "Chat queue size", "int", advanced=True,
+                help="pending chat translations before new ones are dropped"),
 ]
 
 
