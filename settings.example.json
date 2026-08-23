@@ -20,5 +20,6 @@
   "enable_context_helper": true,
   "context_confidence_threshold": -0.5,
   "context_helper_model": "Qwen/Qwen2.5-1.5B-Instruct",
-  "asr_confidence_threshold": -0.6
+  "asr_confidence_threshold": -0.6,
+  "window_opacity": 0.82
 }

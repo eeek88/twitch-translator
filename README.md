@@ -59,9 +59,15 @@ following live. Window positions and sizes are remembered between launches.
 
 Click the **…** at the top-right of the caption bar for the menu: open the
 in-app **Settings** dialog (every option below, editable with a GUI — including
-the chat channel name), show/hide the chat panel, or quit. Press **Escape**
+the chat channel name), show/hide the chat panel, show/hide a small
+[performance stats window](#performance-stats) or the
+[context notes window](#context-helper), start/stop
+[recording a transcript](#transcript-recording), or quit. Press **Escape**
 with the caption window focused to quit. The chat panel's **✕** hides it;
 hiding it also pauses chat translation so it costs no GPU time.
+
+Target language, like chat channel, can be changed live from Settings —
+takes effect on the next line translated, no restart needed.
 
 ### Translated chat panel
 
@@ -118,6 +124,31 @@ translation confidence: faster-whisper's own confidence in the
 alone can't — Whisper mishears a word, and NLLB then translates that wrong
 text fluently and confidently, so nothing about the translation itself looks
 shaky even though the whole line is wrong from the start.
+
+A small **◆** indicator next to the caption bar's listening dot lights up
+(amber) while the helper is actively generating a note, so a flagged line's
+silence reads as "working on it" rather than nothing happening.
+
+Hovering the exact flagged line isn't the only way to read a note — **…
+menu → Show context notes** opens a small independent window listing every
+note as it's generated (original, translation, and the note itself), so you
+can read them without needing to find and hover the original line again.
+It's a separate floating window, not docked with caption/chat.
+
+### Performance stats
+
+**… menu → Show performance stats** opens a small window with caption
+round-trip latency (last + rolling average), CPU%, and GPU VRAM used/total.
+Off by default and not persisted — it's a curiosity/debugging aid, not
+something most sessions need, so it's a manual per-session toggle rather
+than a setting.
+
+### Transcript recording
+
+**… menu → Start recording transcript** writes every caption and chat line
+(original + translation, timestamped) to a file under `logs/` for the rest
+of the session, until you stop it or quit. Also manual and session-scoped
+by design — nothing gets recorded unless you explicitly start it.
 
 ### Settings
 

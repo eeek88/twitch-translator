@@ -33,6 +33,7 @@ DEFAULTS: dict[str, Any] = {
     "context_confidence_threshold": -0.5,  # translations below this avg. log-prob get flagged
     "context_helper_model": "Qwen/Qwen2.5-1.5B-Instruct",  # huggingface repo id, runs on CPU
     "asr_confidence_threshold": -0.6,  # transcriptions below this avg. log-prob get flagged too
+    "window_opacity": 0.82,          # 0-1; applies to caption, chat, and settings windows
 }
 
 
@@ -66,7 +67,7 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="bigger = better translations, more VRAM"),
     SettingSpec("device", "Inference device", "choice", ["cuda", "cpu"],
                 help="cuda needs an NVIDIA GPU"),
-    SettingSpec("target_lang", "Target language", "text",
+    SettingSpec("target_lang", "Target language", "text", live=True,
                 help="NLLB code, e.g. eng_Latn, spa_Latn, jpn_Jpan"),
     SettingSpec("glossary", "Glossary", "text",
                 help="comma-separated names/jargon the streamer says often — helps Whisper hear them right"),
@@ -78,6 +79,9 @@ SETTING_SPECS: list[SettingSpec] = [
     SettingSpec("chat_font_size", "Chat font size", "int", live=True,
                 help="also adjustable with Ctrl+scroll directly on the chat window",
                 min_value=8, max_value=48),
+    SettingSpec("window_opacity", "Window opacity", "float", live=True,
+                help="0-1; applies to the caption, chat, and settings windows",
+                min_value=0.1, max_value=1.0),
     # --- advanced: fine-tuning knobs, touched far less often ---
     SettingSpec("chat_channel", "Chat channel", "text", live=True, advanced=True,
                 help="also (and better) editable directly on the chat panel, with tab detection"),

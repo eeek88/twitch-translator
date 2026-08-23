@@ -24,6 +24,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterator, Optional
 
 from . import capture
@@ -32,6 +33,8 @@ from .context_helper import DEFAULT_MODEL_NAME as DEFAULT_CONTEXT_MODEL_NAME
 from .langcodes import WHISPER_TO_NLLB, to_nllb
 from .translate import DEFAULT_MODEL_NAME, Translator
 from .vad import VADSegmenter
+
+TRANSCRIPT_DIR = Path(__file__).resolve().parent.parent / "logs"
 
 CHAT_DETECT_MIN_CONFIDENCE = 0.9  # below this, short-text language detection is guesswork
 CONTEXT_QUEUE_MAXSIZE = 20  # pending context-helper requests before new ones drop
@@ -84,6 +87,17 @@ class ContextReady:
     flagged line. The overlay matches it back up by line_id."""
     line_id: int
     context: str
+
+
+@dataclass
+class NoteEvent:
+    """Posted to Pipeline.notes_queue every time the context helper finishes
+    a note — feeds the optional, freely-floating notes window, which shows
+    every note as a running log rather than only on hover."""
+    original_text: str
+    translated_text: str
+    lang: str
+    note: str
 
 
 def _log(line: str) -> None:
@@ -147,6 +161,11 @@ class Pipeline:
         self._chat_in_queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue(maxsize=chat_queue_maxsize)
         self.caption_queue: "queue.Queue[object]" = queue.Queue()
         self.chat_out_queue: "queue.Queue[object]" = queue.Queue()
+        # Every completed context-helper note, for the optional notes window
+        # (a running log, independent of which line(s) it ended up attached
+        # to). Unbounded like caption_queue/chat_out_queue: it's fed at the
+        # same slow rate as the context worker itself, never a burst source.
+        self.notes_queue: "queue.Queue[NoteEvent]" = queue.Queue()
         # (cache_key, original_text, translated_text, lang) for text awaiting a
         # context-helper explanation. Bounded: under a sustained high flag rate
         # (e.g. an aggressive confidence threshold on a busy chat) the CPU
@@ -163,10 +182,72 @@ class Pipeline:
         # Recent translated chat lines, given to the context helper as extra
         # situational context for its notes.
         self._recent_chat: "deque[str]" = deque(maxlen=RECENT_CHAT_MAXLEN)
+        # Set for the duration of each context-helper LLM call — lets the UI
+        # show an ambient "working on a note" indicator, same idea as the
+        # VAD listening dot.
+        self._context_worker_busy = threading.Event()
+        # Rolling window of ASR+translation wall-clock time per utterance —
+        # feeds the optional perf overlay. Not locked: appends from a single
+        # thread (_gpu_worker), reads are only for display.
+        self._caption_latencies: "deque[float]" = deque(maxlen=20)
+        # Session-scoped transcript recording — off by default, started/
+        # stopped explicitly via the caption bar's menu, never automatic.
+        self._transcript_file = None
+        self._transcript_lock = threading.Lock()
         self._stop = threading.Event()
         self._chat_enabled = threading.Event()
         self._chat_enabled.set()
         self._threads: list[threading.Thread] = []
+
+    @property
+    def context_helper_busy(self) -> bool:
+        """True while the context-helper thread is actively working on a note
+        (including its one-time model load) — drives the UI's activity dot."""
+        return self._context_worker_busy.is_set()
+
+    def _record_caption_latency(self, seconds: float) -> None:
+        self._caption_latencies.append(seconds)
+
+    @property
+    def last_caption_latency(self) -> Optional[float]:
+        """Seconds for the most recent utterance's ASR+translation, or None
+        before the first one. Feeds the optional perf overlay."""
+        return self._caption_latencies[-1] if self._caption_latencies else None
+
+    @property
+    def avg_caption_latency(self) -> Optional[float]:
+        """Average over the last 20 utterances, or None before the first one."""
+        if not self._caption_latencies:
+            return None
+        return sum(self._caption_latencies) / len(self._caption_latencies)
+
+    def start_transcript_recording(self) -> Path:
+        """Begins writing every caption/chat line (original + translation) to
+        a timestamped file under logs/, until stop_transcript_recording() or
+        the app quits. Explicit and session-scoped — there's no setting that
+        turns this on automatically."""
+        TRANSCRIPT_DIR.mkdir(exist_ok=True)
+        path = TRANSCRIPT_DIR / f"transcript_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        f = open(path, "w", encoding="utf-8")
+        with self._transcript_lock:
+            self._transcript_file = f
+        return path
+
+    def stop_transcript_recording(self) -> None:
+        with self._transcript_lock:
+            if self._transcript_file is not None:
+                self._transcript_file.close()
+                self._transcript_file = None
+
+    @property
+    def is_recording_transcript(self) -> bool:
+        return self._transcript_file is not None
+
+    def _write_transcript(self, line: str) -> None:
+        with self._transcript_lock:
+            if self._transcript_file is not None:
+                self._transcript_file.write(line + "\n")
+                self._transcript_file.flush()
 
     def set_chat_channel(self, channel: Optional[str]) -> None:
         """Switch the chat reader to a different channel. If a connection is
@@ -193,6 +274,13 @@ class Pipeline:
         with self._chat_reader_lock:
             if self._chat_reader is not None:
                 self._chat_reader.stop()
+
+    def set_target_lang(self, target_lang: str) -> None:
+        """Switch the translation target language immediately. No reconnect
+        or model reload needed: translate_scored() already reads
+        self.target_lang fresh on every call, and the chat reader's
+        already-in-target-language check does too (see _read_chat)."""
+        self.target_lang = target_lang
 
     def set_chat_enabled(self, enabled: bool) -> None:
         """Pause/resume chat translation at runtime (e.g. when the panel is hidden).
@@ -248,7 +336,6 @@ class Pipeline:
                 time.sleep(0.5)  # no channel picked yet — idle until set_chat_channel()
                 continue
 
-            target_whisper_langs = {w for w, n in WHISPER_TO_NLLB.items() if n == self.target_lang}
             reader = ChatReader(channel)
             with self._chat_reader_lock:
                 self._chat_reader = reader
@@ -267,7 +354,10 @@ class Pipeline:
                     if not any(ch.isalpha() for ch in message):
                         continue
                     lang, prob = identifier.classify(message)
-                    if lang in target_whisper_langs:
+                    # Read self.target_lang fresh (not a set captured once at
+                    # connection time) so a live set_target_lang() call takes
+                    # effect immediately, same connection, no reconnect needed.
+                    if WHISPER_TO_NLLB.get(lang) == self.target_lang:
                         continue  # already in the target language
                     if float(prob) < CHAT_DETECT_MIN_CONFIDENCE:
                         continue  # too short/ambiguous to trust the detection
@@ -305,6 +395,7 @@ class Pipeline:
             if utterance is None:
                 self.caption_queue.put(None)
                 return
+            t0 = time.perf_counter()
             try:
                 asr_result = self.asr.transcribe_scored(utterance)
                 text, lang = asr_result.text, asr_result.language
@@ -316,10 +407,12 @@ class Pipeline:
                     _log(f"[{lang}] {text!r} -> (suppressed: repetition loop)")
                     continue
                 _log(f"[{lang}] {text!r} -> {result.text!r}")
+                self._write_transcript(f"[{time.strftime('%H:%M:%S')}] [{lang}] {text} -> {result.text}")
                 caption = Caption(lang, text, result.text)
                 self._maybe_flag_for_context(caption, text, result, lang, is_chat=False,
                                              asr_confidence=asr_result.confidence)
                 self.caption_queue.put(caption)
+                self._record_caption_latency(time.perf_counter() - t0)
             except Exception as exc:
                 self.caption_queue.put(Caption.status(f"[transcription error: {exc}]"))
 
@@ -336,6 +429,8 @@ class Pipeline:
                 _log(f"[chat/{lang}] {username}: {message!r} -> (suppressed: repetition loop)")
                 return
             _log(f"[chat/{lang}] {username}: {message!r} -> {result.text!r}")
+            self._write_transcript(
+                f"[{time.strftime('%H:%M:%S')}] [chat/{lang}] {username}: {message} -> {result.text}")
             self._recent_chat.append(f"{username}: {result.text}")
             chat_line = ChatLine(username, lang, message, result.text)
             self._maybe_flag_for_context(chat_line, message, result, lang, is_chat=True)
@@ -394,16 +489,20 @@ class Pipeline:
                 key, original_text, translated_text, lang = self._context_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if helper is None:
-                _log("Loading context-helper model (first flagged line)...")
-                from .context_helper import ContextHelper
-                helper = ContextHelper(model_name=self.context_helper_model)
+            self._context_worker_busy.set()
             try:
-                note = helper.explain(original_text, translated_text, lang,
-                                      recent_chat=list(self._recent_chat))
-            except Exception as exc:
-                _log(f"[context helper error: {exc}]")
-                note = ""
+                if helper is None:
+                    _log("Loading context-helper model (first flagged line)...")
+                    from .context_helper import ContextHelper
+                    helper = ContextHelper(model_name=self.context_helper_model)
+                try:
+                    note = helper.explain(original_text, translated_text, lang,
+                                          recent_chat=list(self._recent_chat))
+                except Exception as exc:
+                    _log(f"[context helper error: {exc}]")
+                    note = ""
+            finally:
+                self._context_worker_busy.clear()
             with self._context_cache_lock:
                 waiters = self._context_inflight.pop(key, [])
                 if note:
@@ -412,6 +511,7 @@ class Pipeline:
                         del self._context_cache[next(iter(self._context_cache))]
             if not note:
                 continue
+            self.notes_queue.put(NoteEvent(original_text, translated_text, lang, note))
             for line_id, is_chat in waiters:
                 target_queue = self.chat_out_queue if is_chat else self.caption_queue
                 target_queue.put(ContextReady(line_id, note))
@@ -430,6 +530,7 @@ class Pipeline:
 
     def stop(self):
         self._stop.set()
+        self.stop_transcript_recording()
 
     def captions(self) -> Iterator[Caption]:
         """Blocking iterator over captions (including status/error lines).

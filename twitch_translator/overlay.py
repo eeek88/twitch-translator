@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 from .firefox_tabs import list_twitch_channels
-from .pipeline import Caption, ChatLine, ContextReady, Pipeline
+from .pipeline import Caption, ChatLine, ContextReady, NoteEvent, Pipeline
 from .settings import SETTING_SPECS, load_settings, save_settings
 
 BG_COLOR = "#101010"
@@ -31,7 +31,7 @@ LISTENING_ACTIVE_COLOR = "#5fd68a"  # soft green: VAD currently sees speech
 TOOLTIP_BG = "#2a2a2a"
 CONTEXT_FLAG_COLOR = "#e8b339"  # marks a line the context helper flagged as shaky
 ACTIVE_COLOR = "#7fb8ff"   # same accent as chat usernames: "on/docked" state for toggle buttons
-WINDOW_ALPHA = 0.82
+DEFAULT_WINDOW_ALPHA = 0.82  # overridden by the window_opacity setting
 HISTORY_LINES = 300
 MIN_FONT_SIZE, MAX_FONT_SIZE = 8, 48
 
@@ -357,12 +357,14 @@ class CaptionOverlay:
         self.poll_ms = poll_ms
         self.pipeline = pipeline
         self.chat_overlay: Optional[ChatOverlay] = None
+        self.perf_overlay: Optional["PerfOverlay"] = None
+        self.notes_overlay: Optional["NotesOverlay"] = None
 
         self.root = tk.Tk()
         self.root.title("Twitch Live Translator")
         self.root.overrideredirect(True)
         self.root.attributes("-topmost", True)
-        self.root.attributes("-alpha", WINDOW_ALPHA)
+        self.root.attributes("-alpha", load_settings().get("window_opacity", DEFAULT_WINDOW_ALPHA))
         self.root.configure(bg=BG_COLOR)
         self.root.geometry(_validate_geometry(geometry) or "900x160+180+760")
         self.root.minsize(CAPTION_MIN_W, CAPTION_MIN_H)
@@ -402,6 +404,20 @@ class CaptionOverlay:
         self.listening_dot.place(relx=0.0, rely=0.0, anchor="nw")
         self.listening_dot.lift()
 
+        # Same idea, for the context helper: lights up (amber, matching the
+        # ● marker on flagged lines) while it's actively generating a note,
+        # so there's feedback that something's coming rather than silence.
+        # Only shown if the helper is actually enabled — otherwise it would
+        # just sit dark forever.
+        self.context_dot: Optional[tk.Label] = None
+        if self.pipeline is not None and self.pipeline.context_helper_enabled:
+            self.root.update_idletasks()
+            dot_x = self.listening_dot.winfo_reqwidth()
+            self.context_dot = tk.Label(self.root, text="◆", font=("Segoe UI", 9),
+                                        fg=LISTENING_IDLE_COLOR, bg=BG_COLOR, padx=6)
+            self.context_dot.place(relx=0.0, rely=0.0, anchor="nw", x=dot_x)
+            self.context_dot.lift()
+
         grip = _make_resize_grip(self.root, CAPTION_MIN_W, CAPTION_MIN_H,
                                  on_resize=self._sync_chat_height)
         grip.place(relx=1.0, rely=1.0, anchor="se")
@@ -423,10 +439,48 @@ class CaptionOverlay:
                 label="Hide chat panel" if visible else "Show chat panel",
                 command=self.chat_overlay.toggle,
             )
+        menu.add_command(
+            label="Hide performance stats" if self.perf_overlay is not None else "Show performance stats",
+            command=self._toggle_perf_overlay,
+        )
+        if self.pipeline is not None and self.pipeline.context_helper_enabled:
+            menu.add_command(
+                label="Hide context notes" if self.notes_overlay is not None else "Show context notes",
+                command=self._toggle_notes_overlay,
+            )
+        if self.pipeline is not None:
+            recording = self.pipeline.is_recording_transcript
+            menu.add_command(
+                label="Stop recording transcript" if recording else "Start recording transcript",
+                command=self._toggle_transcript_recording,
+            )
         menu.add_separator()
         menu.add_command(label="Quit", command=self.quit)
         menu.tk_popup(event.x_root, event.y_root)
         return "break"
+
+    def _toggle_perf_overlay(self):
+        if self.perf_overlay is not None:
+            self.perf_overlay.close()
+            self.perf_overlay = None
+        else:
+            self.perf_overlay = PerfOverlay(self.root, self.pipeline)
+
+    def _toggle_transcript_recording(self):
+        if self.pipeline is None:
+            return
+        if self.pipeline.is_recording_transcript:
+            self.pipeline.stop_transcript_recording()
+        else:
+            path = self.pipeline.start_transcript_recording()
+            messagebox.showinfo("Recording transcript", f"Recording to:\n{path}", parent=self.root)
+
+    def _toggle_notes_overlay(self):
+        if self.notes_overlay is not None:
+            self.notes_overlay.close()
+            self.notes_overlay = None
+        else:
+            self.notes_overlay = NotesOverlay(self.root, self.pipeline, self.poll_ms)
 
     def _toggle_chat_button(self, _event=None):
         if self.chat_overlay is not None:
@@ -512,6 +566,10 @@ class CaptionOverlay:
             speaking = self.pipeline.vad.is_speaking
             self.listening_dot.configure(
                 fg=LISTENING_ACTIVE_COLOR if speaking else LISTENING_IDLE_COLOR)
+            if self.context_dot is not None:
+                busy = self.pipeline.context_helper_busy
+                self.context_dot.configure(
+                    fg=CONTEXT_FLAG_COLOR if busy else LISTENING_IDLE_COLOR)
         if self.chat_overlay is not None:
             # Polled rather than hooked into every place chat visibility can
             # change (the 💬 button, the … menu, Settings) — simpler than
@@ -548,7 +606,7 @@ class ChatOverlay:
         self.win.title("Translated Chat")
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", WINDOW_ALPHA)
+        self.win.attributes("-alpha", load_settings().get("window_opacity", DEFAULT_WINDOW_ALPHA))
         self.win.configure(bg=BG_COLOR)
         self.win.geometry(_validate_geometry(geometry) or "380x300+1160+400")
         self.win.minsize(CHAT_MIN_W, CHAT_MIN_H)
@@ -668,6 +726,141 @@ class ChatOverlay:
         self.win.after(self.poll_ms, self._poll)
 
 
+class PerfOverlay:
+    """Small floating window with a few performance stats — caption
+    round-trip latency, CPU%, GPU VRAM. Opt-in via the caption bar's menu
+    (not a setting that silently persists across launches): it's a
+    curiosity/debugging aid, not something most sessions need, and psutil/
+    torch queries aren't free enough to run on the other panels' 100ms poll,
+    hence its own slower timer."""
+
+    UPDATE_MS = 1000
+
+    def __init__(self, parent: tk.Tk, pipeline: Optional[Pipeline]):
+        self.pipeline = pipeline
+        self._psutil_proc = None
+        try:
+            import psutil
+            self._psutil_proc = psutil.Process()
+            self._psutil_proc.cpu_percent()  # first call always returns 0.0; this primes it
+        except Exception:
+            pass
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("Performance")
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.win.attributes("-alpha", load_settings().get("window_opacity", DEFAULT_WINDOW_ALPHA))
+        self.win.configure(bg=BG_COLOR)
+        self.win.geometry("230x110+40+40")
+        self.win.minsize(180, 90)
+
+        close_btn = tk.Label(self.win, text="✕", font=("Segoe UI", 10),
+                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6, pady=4)
+        close_btn.place(relx=1.0, rely=0.0, anchor="ne")
+        close_btn.bind("<ButtonPress-1>", lambda _e: self.close())
+
+        self.label = tk.Label(self.win, text="", font=("Consolas", 9), fg=FG_COLOR, bg=BG_COLOR,
+                              justify="left", anchor="nw", padx=10, pady=10)
+        self.label.pack(expand=True, fill="both")
+
+        _make_draggable(self.win, self.win, self.label)
+        self._closed = False
+        self._poll()
+
+    def _poll(self):
+        if self._closed:
+            return
+        lines = []
+        if self.pipeline is not None:
+            last = self.pipeline.last_caption_latency
+            if last is not None:
+                avg = self.pipeline.avg_caption_latency
+                lines.append(f"caption latency: {last:.2f}s")
+                lines.append(f"  (avg: {avg:.2f}s)")
+            else:
+                lines.append("caption latency: —")
+        if self._psutil_proc is not None:
+            try:
+                lines.append(f"CPU: {self._psutil_proc.cpu_percent():.0f}%")
+            except Exception:
+                pass
+        try:
+            import torch
+            if torch.cuda.is_available():
+                used = torch.cuda.memory_allocated() / (1024 ** 3)
+                total = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+                lines.append(f"GPU VRAM: {used:.1f} / {total:.1f} GB")
+        except Exception:
+            pass
+        self.label.configure(text="\n".join(lines) if lines else "no data yet")
+        self.win.after(self.UPDATE_MS, self._poll)
+
+    def close(self):
+        self._closed = True
+        self.win.destroy()
+
+
+class NotesOverlay:
+    """Floating, independently-positioned window listing every context-helper
+    note as it's generated — a running log, for reading notes without
+    needing to hover the exact flagged line each time. Deliberately not
+    docked with caption/chat: that docking logic (matched heights, tandem
+    drag) is built for exactly a 2-panel group, and a third always-attached
+    panel would complicate it for a window most sessions won't even open."""
+
+    def __init__(self, parent: tk.Tk, pipeline: Optional[Pipeline], poll_ms: int):
+        self.pipeline = pipeline
+        self.poll_ms = poll_ms
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("Context Notes")
+        self.win.overrideredirect(True)
+        self.win.attributes("-topmost", True)
+        self.win.attributes("-alpha", load_settings().get("window_opacity", DEFAULT_WINDOW_ALPHA))
+        self.win.configure(bg=BG_COLOR)
+        self.win.geometry("420x260+40+400")
+        self.win.minsize(260, 140)
+
+        top_bar = tk.Frame(self.win, bg=BG_COLOR)
+        top_bar.pack(side="top", fill="x")
+        tk.Label(top_bar, text="Context Notes", font=("Segoe UI", 9, "bold"),
+                fg=CONTROL_COLOR, bg=BG_COLOR, padx=8, pady=4).pack(side="left")
+        close_btn = tk.Label(top_bar, text="✕", font=("Segoe UI", 11),
+                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6)
+        close_btn.pack(side="right")
+        close_btn.bind("<ButtonPress-1>", lambda _e: self.close())
+
+        self.scrollback = _ScrollbackText(self.win, ("Segoe UI", 10))
+        self.scrollback.frame.pack(expand=True, fill="both")
+
+        grip = _make_resize_grip(self.win, 260, 140)
+        grip.place(relx=1.0, rely=1.0, anchor="se")
+        grip.lift()
+
+        _make_draggable(self.win, self.win, top_bar, self.scrollback.text)
+        self._closed = False
+        self._poll()
+
+    def _poll(self):
+        if self._closed:
+            return
+        if self.pipeline is not None:
+            try:
+                while True:
+                    event: NoteEvent = self.pipeline.notes_queue.get_nowait()
+                    self.scrollback.append(
+                        [(f"{event.original_text} → {event.translated_text}", None)])
+                    self.scrollback.append([(f"\U0001f4a1 {event.note}", "time")])
+            except queue.Empty:
+                pass
+        self.win.after(self.poll_ms, self._poll)
+
+    def close(self):
+        self._closed = True
+        self.win.destroy()
+
+
 class SettingsPanel:
     """Dark-themed settings panel docked against the caption window — same
     visual language as the rest of the app (CaptionOverlay/ChatOverlay), not
@@ -688,7 +881,7 @@ class SettingsPanel:
         self.win.title("Settings")
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.attributes("-alpha", WINDOW_ALPHA)
+        self.win.attributes("-alpha", load_settings().get("window_opacity", DEFAULT_WINDOW_ALPHA))
         self.win.configure(bg=BG_COLOR)
 
         header = tk.Frame(self.win, bg=BG_COLOR)
@@ -855,8 +1048,15 @@ class SettingsPanel:
             new_channel = updates["chat_channel"]
             chat_overlay.channel_var.set(new_channel or "")
             chat_overlay._on_channel_change()
+        if "target_lang" in updates and self.overlay.pipeline is not None:
+            self.overlay.pipeline.set_target_lang(updates["target_lang"])
         if "caption_font_size" in updates:
             self.overlay.scrollback.set_font_size(updates["caption_font_size"])
         if "chat_font_size" in updates and chat_overlay is not None:
             size = chat_overlay.scrollback.set_font_size(updates["chat_font_size"])
             chat_overlay.scrollback.text.tag_configure("name", font=("Segoe UI", size, "bold"))
+        if "window_opacity" in updates:
+            opacity = updates["window_opacity"]
+            self.overlay.root.attributes("-alpha", opacity)
+            if chat_overlay is not None:
+                chat_overlay.win.attributes("-alpha", opacity)
