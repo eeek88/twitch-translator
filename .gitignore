@@ -18,3 +18,4 @@ settings.json
 
 # Runtime log (written fresh each launch, console output mirrors here)
 logs/
+app_run.log

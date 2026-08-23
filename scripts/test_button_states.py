@@ -1,6 +1,5 @@
-"""Test: chat_btn colors blue when chat is visible, default gray when hidden;
-combine_btn is mapped (visible) only while chat is visible. Drives _poll()
-directly rather than waiting on the real timer."""
+"""Test: chat_btn colors blue when chat is visible, default gray when hidden.
+Drives _poll() directly rather than waiting on the real timer."""
 import queue
 import sys
 from pathlib import Path
@@ -14,23 +13,21 @@ def main():
     overlay.attach_chat(queue.Queue())
     overlay.root.update()
 
-    def check(label, expect_chat_color, expect_combine_mapped):
+    def check(label, expect_chat_color):
         overlay._poll()  # does its work synchronously, then re-schedules itself (harmless, never fires — we destroy root before mainloop)
         overlay.root.update()
         chat_color = overlay.chat_btn.cget("fg")
-        combine_mapped = bool(overlay.combine_btn.winfo_ismapped())
-        ok = chat_color == expect_chat_color and combine_mapped == expect_combine_mapped
+        ok = chat_color == expect_chat_color
         print(f"{'PASS' if ok else 'FAIL'} [{label}] "
-              f"chat_btn fg={chat_color} (want {expect_chat_color}), "
-              f"combine_btn mapped={combine_mapped} (want {expect_combine_mapped})")
+              f"chat_btn fg={chat_color} (want {expect_chat_color})")
 
-    check("chat visible (default)", ACTIVE_COLOR, True)
+    check("chat visible (default)", ACTIVE_COLOR)
 
     overlay.chat_overlay.toggle()  # hide
-    check("chat hidden", CONTROL_COLOR, False)
+    check("chat hidden", CONTROL_COLOR)
 
     overlay.chat_overlay.toggle()  # show again
-    check("chat shown again", ACTIVE_COLOR, True)
+    check("chat shown again", ACTIVE_COLOR)
 
     overlay.root.destroy()
 

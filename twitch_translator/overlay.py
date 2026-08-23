@@ -16,7 +16,7 @@ from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
 from .firefox_tabs import list_twitch_channels
-from .pipeline import Caption, ChatLine, Pipeline
+from .pipeline import Caption, ChatLine, ContextReady, Pipeline
 from .settings import SETTING_SPECS, load_settings, save_settings
 
 BG_COLOR = "#101010"
@@ -29,6 +29,7 @@ SCROLLBAR_HOVER = "#7a7a7a"   # ...until hovered or dragged
 LISTENING_IDLE_COLOR = "#3a3a3a"   # dim: no speech detected right now
 LISTENING_ACTIVE_COLOR = "#5fd68a"  # soft green: VAD currently sees speech
 TOOLTIP_BG = "#2a2a2a"
+CONTEXT_FLAG_COLOR = "#e8b339"  # marks a line the context helper flagged as shaky
 ACTIVE_COLOR = "#7fb8ff"   # same accent as chat usernames: "on/docked" state for toggle buttons
 WINDOW_ALPHA = 0.82
 HISTORY_LINES = 300
@@ -68,9 +69,7 @@ def _make_draggable(win: tk.Misc, *widgets: tk.Misc,
                     companion: Optional[Callable[[], Optional[tk.Misc]]] = None):
     """companion, if given, is called on every drag step; when it returns a
     window (rather than None), that window is moved by the same delta as win
-    — used so combined caption/chat windows drag as one unit. It's checked
-    live rather than fixed at bind time, so combine/separate can toggle this
-    without re-binding anything."""
+    — used so the docked caption/chat windows drag as one unit."""
     state = {"dx": 0, "dy": 0}
 
     def start(event):
@@ -92,7 +91,11 @@ def _make_draggable(win: tk.Misc, *widgets: tk.Misc,
         w.bind("<B1-Motion>", move)
 
 
-def _make_resize_grip(win: tk.Misc, min_w: int, min_h: int) -> tk.Label:
+def _make_resize_grip(win: tk.Misc, min_w: int, min_h: int,
+                      on_resize: Optional[Callable[[int, int], None]] = None) -> tk.Label:
+    """on_resize, if given, fires with the new (w, h) on every resize step —
+    used to keep the docked caption/chat windows' heights in sync with
+    each other as either is resized."""
     grip = tk.Label(win, text="⇲", font=("Segoe UI", 10), fg=CONTROL_COLOR,
                     bg=BG_COLOR, cursor="size_nw_se")
     state = {"w": 0, "h": 0, "x": 0, "y": 0}
@@ -106,6 +109,8 @@ def _make_resize_grip(win: tk.Misc, min_w: int, min_h: int) -> tk.Label:
         w = max(min_w, state["w"] + (event.x_root - state["x"]))
         h = max(min_h, state["h"] + (event.y_root - state["y"]))
         win.geometry(f"{w}x{h}")
+        if on_resize:
+            on_resize(w, h)
         return "break"
 
     grip.bind("<ButtonPress-1>", start)
@@ -199,8 +204,12 @@ class _ScrollbackText:
 
         self.text.tag_configure("time", foreground=TIMESTAMP_COLOR,
                                 font=("Consolas", max(MIN_FONT_SIZE, font[1] - 6)))
+        self.text.tag_configure("contextflag", foreground=CONTEXT_FLAG_COLOR)
 
         self._originals: dict[str, str] = {}
+        self._context_notes: dict[str, str] = {}
+        self._pending_context: set[str] = set()
+        self._line_tags: dict[int, str] = {}
         self._next_tag_id = 0
         self._tooltip: Optional[tk.Toplevel] = None
         self._hovered_tag: Optional[str] = None
@@ -208,24 +217,38 @@ class _ScrollbackText:
         self.text.bind("<Leave>", self._on_leave)
         self.text.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
 
-    def append(self, segments: list[tuple[str, Optional[str]]], original: Optional[str] = None):
+    def append(self, segments: list[tuple[str, Optional[str]]], original: Optional[str] = None,
+              line_id: Optional[int] = None, flagged: bool = False):
         """segments: list of (text, extra_tag). Appends one timestamped line.
-        original, if given, becomes a hover tooltip over the whole line."""
+        original, if given, becomes a hover tooltip over the whole line.
+        flagged marks the line with a visual indicator (a colored dot after
+        the text, so the timestamp's position stays fixed either way) and,
+        together with line_id, lets a later set_context() call attach a
+        context-helper note to this same line's tooltip."""
         line_tag = None
-        if original:
+        if original or flagged:
             line_tag = f"orig{self._next_tag_id}"
             self._next_tag_id += 1
-            self._originals[line_tag] = original
+            self._originals[line_tag] = original or ""
             if len(self._originals) > HISTORY_LINES:
-                del self._originals[next(iter(self._originals))]
+                oldest = next(iter(self._originals))
+                del self._originals[oldest]
+                self._context_notes.pop(oldest, None)
+                self._pending_context.discard(oldest)
 
         at_bottom = self.text.yview()[1] >= 0.999
         self.text.configure(state="normal")
         extra = (line_tag,) if line_tag else ()
+        if flagged and line_tag is not None:
+            self._pending_context.add(line_tag)
+            if line_id is not None:
+                self._line_tags[line_id] = line_tag
         self.text.insert("end", time.strftime("%H:%M:%S "), ("time",) + extra)
         for content, tag in segments:
             tags = ((tag,) if tag else ()) + extra
             self.text.insert("end", content, tags)
+        if flagged and line_tag is not None:
+            self.text.insert("end", " ●", ("contextflag",) + extra)
         self.text.insert("end", "\n")
         line_count = int(self.text.index("end-1c").split(".")[0])
         if line_count > HISTORY_LINES:
@@ -237,11 +260,24 @@ class _ScrollbackText:
             # absolute bottom after the pending redraw instead.
             self.text.after_idle(lambda: self.text.yview_moveto(1.0))
 
+    def set_context(self, line_id: int, context: str):
+        """Attaches a context-helper note to a previously-appended flagged
+        line, found via the line_id passed to append(). Silently a no-op if
+        that line has since scrolled out of history."""
+        tag = self._line_tags.pop(line_id, None)
+        if tag is None:
+            return
+        self._context_notes[tag] = context
+        self._pending_context.discard(tag)
+
     def clear(self):
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.configure(state="disabled")
         self._originals.clear()
+        self._context_notes.clear()
+        self._pending_context.clear()
+        self._line_tags.clear()
         self._hide_tooltip()
 
     # --- font size ------------------------------------------------------
@@ -276,7 +312,15 @@ class _ScrollbackText:
         self._hovered_tag = hover_tag
         self._hide_tooltip()
         if hover_tag and hover_tag in self._originals:
-            self._show_tooltip(event, self._originals[hover_tag])
+            self._show_tooltip(event, self._tooltip_content(hover_tag))
+
+    def _tooltip_content(self, tag: str) -> str:
+        content = self._originals.get(tag, "")
+        if tag in self._context_notes:
+            content += f"\n\n💡 {self._context_notes[tag]}"
+        elif tag in self._pending_context:
+            content += "\n\n(analyzing this translation…)"
+        return content
 
     def _on_leave(self, _event=None):
         self._hovered_tag = None
@@ -313,8 +357,6 @@ class CaptionOverlay:
         self.poll_ms = poll_ms
         self.pipeline = pipeline
         self.chat_overlay: Optional[ChatOverlay] = None
-        self.is_combined = False
-        self._chat_pre_combine_geometry: Optional[str] = None
 
         self.root = tk.Tk()
         self.root.title("Twitch Live Translator")
@@ -336,8 +378,7 @@ class CaptionOverlay:
         # Positioned right-to-left using each widget's own measured width
         # rather than fixed pixel offsets — glyphs (especially color emoji
         # like 💬) can render wider than assumed and silently overlap a
-        # fixed-offset neighbor (found live: combine's -52 cut into chat's
-        # left edge because 💬 rendered wider than 24px).
+        # fixed-offset neighbor.
         menu_btn = tk.Label(self.root, text="…", font=("Segoe UI", 13, "bold"),
                             fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=6)
         menu_btn.bind("<ButtonPress-1>", self._open_menu)
@@ -346,20 +387,11 @@ class CaptionOverlay:
                                  fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
         self.chat_btn.bind("<ButtonPress-1>", self._toggle_chat_button)
 
-        # Docks/undocks the chat panel flush against this window (matching
-        # height) so they read as one unit — accent-colored while docked.
-        self.combine_btn = tk.Label(self.root, text="⧉", font=("Segoe UI", 12),
-                                    fg=CONTROL_COLOR, bg=BG_COLOR, cursor="hand2", padx=4)
-        self.combine_btn.bind("<ButtonPress-1>", self._toggle_combine)
-
-        self._combine_btn_x = 0  # set below; _poll() reuses it when re-showing the button
         self.root.update_idletasks()
         x = 0
-        for widget in (menu_btn, self.chat_btn, self.combine_btn):
+        for widget in (menu_btn, self.chat_btn):
             widget.place(relx=1.0, rely=0.0, anchor="ne", x=-x)
             widget.lift()
-            if widget is self.combine_btn:
-                self._combine_btn_x = -x
             x += widget.winfo_reqwidth() + 4
 
         # Subtle "listening" indicator: lights up while VAD currently sees
@@ -370,12 +402,13 @@ class CaptionOverlay:
         self.listening_dot.place(relx=0.0, rely=0.0, anchor="nw")
         self.listening_dot.lift()
 
-        grip = _make_resize_grip(self.root, CAPTION_MIN_W, CAPTION_MIN_H)
+        grip = _make_resize_grip(self.root, CAPTION_MIN_W, CAPTION_MIN_H,
+                                 on_resize=self._sync_chat_height)
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.lift()
 
         _make_draggable(self.root, self.root, self.scrollback.text,
-                        companion=self._combined_chat_window)
+                        companion=self._chat_companion)
         self.root.bind("<Escape>", lambda _e: self.quit())
         self.root.after(self.poll_ms, self._poll)
 
@@ -389,10 +422,6 @@ class CaptionOverlay:
             menu.add_command(
                 label="Hide chat panel" if visible else "Show chat panel",
                 command=self.chat_overlay.toggle,
-            )
-            menu.add_command(
-                label="Separate chat panel" if self.is_combined else "Combine chat panel",
-                command=self._toggle_combine,
             )
         menu.add_separator()
         menu.add_command(label="Quit", command=self.quit)
@@ -413,29 +442,15 @@ class CaptionOverlay:
                 parent=self.root,
             )
 
-    def _toggle_combine(self, _event=None):
-        if self.chat_overlay is None:
-            messagebox.showinfo(
-                "Combine",
-                "Chat was disabled with --no-chat for this session — nothing to combine with.",
-                parent=self.root,
-            )
-            return
-        if self.is_combined:
-            self._separate()
-        else:
-            self._combine()
-
-    def _combine(self):
+    def _dock_chat(self):
         """Docks the chat window flush against this one's right edge (or left,
-        if there isn't room on the right), matching its height — a one-time
-        snap, not an ongoing constraint, so either can still be freely moved
-        or resized afterward."""
+        if there isn't room on the right), matching its height. Caption and
+        chat are always connected this way — there's no separate/undocked
+        mode — so this runs once at startup, and _sync_chat_height keeps the
+        heights matched afterward as either is resized."""
         chat = self.chat_overlay
-        if not chat.is_visible():
-            chat.toggle()  # combining implies you want to see it
-        self._chat_pre_combine_geometry = chat.win.geometry()
-
+        if chat is None:
+            return
         self.root.update_idletasks()
         cx, cy = self.root.winfo_x(), self.root.winfo_y()
         cw, ch = self.root.winfo_width(), self.root.winfo_height()
@@ -447,21 +462,18 @@ class CaptionOverlay:
         new_x = cx + cw if cx + cw + chat_w <= vx + vw else max(vx, cx - chat_w)
 
         chat.win.geometry(f"{chat_w}x{ch}+{new_x}+{cy}")
-        self.is_combined = True
-        self.combine_btn.configure(fg=ACTIVE_COLOR)
 
-    def _separate(self):
-        chat = self.chat_overlay
-        if self._chat_pre_combine_geometry:
-            chat.win.geometry(_validate_geometry(self._chat_pre_combine_geometry)
-                              or "380x300+1160+400")
-        self.is_combined = False
-        self.combine_btn.configure(fg=CONTROL_COLOR)
+    def _sync_chat_height(self, _w: int, h: int):
+        """on_resize callback for this window's grip: keeps the docked chat
+        window's height matched, without touching its width/position."""
+        if self.chat_overlay is not None:
+            chat_w = self.chat_overlay.win.winfo_width()
+            self.chat_overlay.win.geometry(f"{chat_w}x{h}")
 
-    def _combined_chat_window(self) -> Optional[tk.Misc]:
-        """companion callable for _make_draggable: while combined, dragging
-        the caption window drags the chat window along with it."""
-        if self.is_combined and self.chat_overlay is not None and self.chat_overlay.is_visible():
+    def _chat_companion(self) -> Optional[tk.Misc]:
+        """companion callable for _make_draggable: dragging the caption
+        window drags the docked chat window along with it."""
+        if self.chat_overlay is not None and self.chat_overlay.is_visible():
             return self.chat_overlay.win
         return None
 
@@ -487,9 +499,13 @@ class CaptionOverlay:
                 item = self.caption_queue.get_nowait()
                 if item is None:
                     continue
+                if isinstance(item, ContextReady):
+                    self.scrollback.set_context(item.line_id, item.context)
+                    continue
                 caption: Caption = item
                 self.scrollback.append([(caption.translated_text, None)],
-                                       original=caption.original_text)
+                                       original=caption.original_text,
+                                       line_id=caption.line_id, flagged=caption.needs_context)
         except queue.Empty:
             pass
         if self.pipeline is not None:
@@ -498,22 +514,18 @@ class CaptionOverlay:
                 fg=LISTENING_ACTIVE_COLOR if speaking else LISTENING_IDLE_COLOR)
         if self.chat_overlay is not None:
             # Polled rather than hooked into every place chat visibility can
-            # change (the 💬 button, the … menu, Settings, _combine()'s
-            # auto-show) — simpler than threading a callback through all of
-            # them, and self-correcting if anything else toggles it.
+            # change (the 💬 button, the … menu, Settings) — simpler than
+            # threading a callback through all of them, and self-correcting
+            # if anything else toggles it.
             visible = self.chat_overlay.is_visible()
             self.chat_btn.configure(fg=ACTIVE_COLOR if visible else CONTROL_COLOR)
-            if visible and not self.combine_btn.winfo_ismapped():
-                self.combine_btn.place(relx=1.0, rely=0.0, anchor="ne", x=self._combine_btn_x)
-                self.combine_btn.lift()
-            elif not visible and self.combine_btn.winfo_ismapped():
-                self.combine_btn.place_forget()
         self.root.after(self.poll_ms, self._poll)
 
-    def attach_chat(self, chat_queue: "queue.Queue[ChatLine]",
+    def attach_chat(self, chat_queue: "queue.Queue[object]",
                     geometry: Optional[str] = None):
         self.chat_overlay = ChatOverlay(self.root, chat_queue, self.poll_ms,
                                         self.pipeline, geometry, caption_overlay=self)
+        self._dock_chat()
 
     def run(self):
         self.root.mainloop()
@@ -523,7 +535,7 @@ class ChatOverlay:
     """Scrolling panel of translated chat messages, hideable via its ✕ or the
     caption bar's menu. Hiding also pauses chat GPU work in the pipeline."""
 
-    def __init__(self, parent: tk.Tk, chat_queue: "queue.Queue[ChatLine]",
+    def __init__(self, parent: tk.Tk, chat_queue: "queue.Queue[object]",
                  poll_ms: int, pipeline: Optional[Pipeline],
                  geometry: Optional[str] = None,
                  caption_overlay: Optional["CaptionOverlay"] = None):
@@ -573,18 +585,26 @@ class ChatOverlay:
                                            font=("Segoe UI", chat_font_size, "bold"))
         self.scrollback.frame.pack(expand=True, fill="both")
 
-        grip = _make_resize_grip(self.win, CHAT_MIN_W, CHAT_MIN_H)
+        grip = _make_resize_grip(self.win, CHAT_MIN_W, CHAT_MIN_H,
+                                 on_resize=self._sync_caption_height)
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.lift()
 
         _make_draggable(self.win, self.win, top_bar, self.scrollback.text,
-                        companion=self._combined_caption_window)
+                        companion=self._caption_companion)
         self.win.after(self.poll_ms, self._poll)
 
-    def _combined_caption_window(self) -> Optional[tk.Misc]:
-        """companion callable for _make_draggable: while combined, dragging
-        the chat window drags the caption window along with it."""
-        if self.caption_overlay is not None and self.caption_overlay.is_combined:
+    def _sync_caption_height(self, _w: int, h: int):
+        """on_resize callback for this window's grip: keeps the docked
+        caption window's height matched, without touching its width/position."""
+        if self.caption_overlay is not None:
+            cap_w = self.caption_overlay.root.winfo_width()
+            self.caption_overlay.root.geometry(f"{cap_w}x{h}")
+
+    def _caption_companion(self) -> Optional[tk.Misc]:
+        """companion callable for _make_draggable: dragging the chat window
+        drags the docked caption window along with it."""
+        if self.caption_overlay is not None:
             return self.caption_overlay.root
         return None
 
@@ -625,11 +645,16 @@ class ChatOverlay:
     def _poll(self):
         try:
             while True:
-                line: ChatLine = self.chat_queue.get_nowait()
+                item = self.chat_queue.get_nowait()
+                if isinstance(item, ContextReady):
+                    self.scrollback.set_context(item.line_id, item.context)
+                    continue
+                line: ChatLine = item
                 self.scrollback.append([
                     (f"{line.username}: ", "name"),
                     (line.translated_text, None),
-                ], original=line.original_text)
+                ], original=line.original_text,
+                   line_id=line.line_id, flagged=line.needs_context)
         except queue.Empty:
             pass
         self.win.after(self.poll_ms, self._poll)
@@ -640,8 +665,8 @@ class SettingsPanel:
     visual language as the rest of the app (CaptionOverlay/ChatOverlay), not
     a generic OS-styled dialog. Shows only the most commonly-changed
     settings by default; "Advanced" reveals the rest. Docks directly below
-    the caption window (not left/right) so it doesn't collide with a chat
-    window docked there via CaptionOverlay._combine()."""
+    the caption window (not left/right) so it doesn't collide with the chat
+    window, which is always docked there via CaptionOverlay._dock_chat()."""
 
     WIDTH = 440
 
@@ -747,7 +772,7 @@ class SettingsPanel:
 
     def _position(self):
         """Docks flush below the caption window; above it instead if there
-        isn't room below (same virtual-screen-bounds check _combine() uses)."""
+        isn't room below (same virtual-screen-bounds check _dock_chat() uses)."""
         parent = self.overlay.root
         parent.update_idletasks()
         self.win.update_idletasks()

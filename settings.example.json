@@ -16,5 +16,7 @@
   "chat_geometry": null,
   "glossary": "",
   "caption_font_size": 18,
-  "chat_font_size": 11
+  "chat_font_size": 11,
+  "enable_context_helper": true,
+  "context_confidence_threshold": -0.5
 }

@@ -110,6 +110,11 @@ def parse_args():
                          "required for chat in browser mode (the process name isn't a channel).")
     p.add_argument("--chat-queue-maxsize", type=int, default=s["chat_queue_maxsize"],
                     help=f"pending chat translations before new ones are dropped (default: {s['chat_queue_maxsize']})")
+    p.add_argument("--no-context-helper", action="store_true", default=not s["enable_context_helper"],
+                    help="disable flagging shaky translations for a hover explanation")
+    p.add_argument("--context-confidence-threshold", type=float, default=s["context_confidence_threshold"],
+                    help="avg. log-prob below this gets flagged as shaky "
+                         f"(default: {s['context_confidence_threshold']})")
     return p.parse_args()
 
 
@@ -160,6 +165,8 @@ def main():
         chat_queue_maxsize=args.chat_queue_maxsize,
         glossary=args.glossary or "",
         chat_disabled=args.no_chat,
+        context_helper_enabled=not args.no_context_helper,
+        context_confidence_threshold=args.context_confidence_threshold,
     )
     pipeline.start()
 

@@ -29,6 +29,8 @@ DEFAULTS: dict[str, Any] = {
     "chat_geometry": None,           # last chat-window geometry, saved on exit
     "caption_font_size": 18,         # also adjustable with Ctrl+scroll on the caption window
     "chat_font_size": 11,            # also adjustable with Ctrl+scroll on the chat window
+    "enable_context_helper": True,   # flag shaky translations and explain them on hover (runs on CPU)
+    "context_confidence_threshold": -0.5,  # translations below this avg. log-prob get flagged
 }
 
 
@@ -83,6 +85,10 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="utterances are cut at this length to bound latency"),
     SettingSpec("chat_queue_maxsize", "Chat queue size", "int", advanced=True,
                 help="pending chat translations before new ones are dropped"),
+    SettingSpec("enable_context_helper", "Context helper", "bool", advanced=True,
+                help="flag shaky translations (● marker) with a hover explanation, via a small CPU model"),
+    SettingSpec("context_confidence_threshold", "Context helper threshold", "float", advanced=True,
+                help="avg. log-prob below this gets flagged; more negative = only the shakiest lines"),
 ]
 
 
