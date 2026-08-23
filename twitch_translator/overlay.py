@@ -15,6 +15,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable, Optional
 
+from .dock_tracker import DockTracker, DockUpdate
 from .firefox_tabs import list_twitch_channels
 from .pipeline import Caption, ChatLine, ContextReady, NoteEvent, Pipeline
 from .settings import SETTING_SPECS, load_settings, save_settings
@@ -66,10 +67,16 @@ def _validate_geometry(geometry: Optional[str]) -> Optional[str]:
 
 
 def _make_draggable(win: tk.Misc, *widgets: tk.Misc,
-                    companion: Optional[Callable[[], Optional[tk.Misc]]] = None):
+                    companion: Optional[Callable[[], Optional[tk.Misc]]] = None,
+                    on_move: Optional[Callable[[int, int], None]] = None):
     """companion, if given, is called on every drag step; when it returns a
     window (rather than None), that window is moved by the same delta as win
-    — used so the docked caption/chat windows drag as one unit."""
+    — used so the caption/chat panel pair drag as one unit.
+
+    on_move, if given, is called on every drag step with the new absolute
+    (x, y) — used by stream-docked mode to record how far a drag has
+    shifted the window from the tracker's auto-computed position, as a
+    persistent offset, without changing how the drag itself feels."""
     state = {"dx": 0, "dy": 0}
 
     def start(event):
@@ -84,6 +91,8 @@ def _make_draggable(win: tk.Misc, *widgets: tk.Misc,
             dx, dy = new_x - win.winfo_x(), new_y - win.winfo_y()
             other.geometry(f"+{other.winfo_x() + dx}+{other.winfo_y() + dy}")
         win.geometry(f"+{new_x}+{new_y}")
+        if on_move:
+            on_move(new_x, new_y)
         return "break"
 
     for w in widgets:
@@ -360,6 +369,20 @@ class CaptionOverlay:
         self.perf_overlay: Optional["PerfOverlay"] = None
         self.notes_overlay: Optional["NotesOverlay"] = None
 
+        # Stream-docked mode: the caption bar auto-positions itself over the
+        # bottom of the Twitch video and follows it (scroll, resize) instead
+        # of sitting wherever it was left. Off by default — opt in each
+        # session via the … menu, not auto-started from a saved setting,
+        # since it depends on an external precondition (Firefox running
+        # with -marionette) that may not hold at any given launch.
+        self._stream_docked = False
+        self.dock_tracker: Optional[DockTracker] = None
+        self._dock_queue: "queue.Queue[DockUpdate]" = queue.Queue()
+        self._last_dock_update: Optional[DockUpdate] = None
+        s = load_settings()
+        self._dock_offset_x = s.get("caption_dock_offset_x", 0)
+        self._dock_offset_y = s.get("caption_dock_offset_y", 0)
+
         self.root = tk.Tk()
         self.root.title("Twitch Live Translator")
         self.root.overrideredirect(True)
@@ -424,7 +447,7 @@ class CaptionOverlay:
         grip.lift()
 
         _make_draggable(self.root, self.root, self.scrollback.text,
-                        companion=self._chat_companion)
+                        companion=self._chat_companion, on_move=self._on_dragged)
         self.root.bind("<Escape>", lambda _e: self.quit())
         self.root.after(self.poll_ms, self._poll)
 
@@ -454,6 +477,11 @@ class CaptionOverlay:
                 label="Stop recording transcript" if recording else "Start recording transcript",
                 command=self._toggle_transcript_recording,
             )
+        if self.pipeline is not None:
+            menu.add_command(
+                label="Undock from stream" if self._stream_docked else "Dock to stream",
+                command=self._toggle_stream_dock,
+            )
         menu.add_separator()
         menu.add_command(label="Quit", command=self.quit)
         menu.tk_popup(event.x_root, event.y_root)
@@ -474,6 +502,70 @@ class CaptionOverlay:
         else:
             path = self.pipeline.start_transcript_recording()
             messagebox.showinfo("Recording transcript", f"Recording to:\n{path}", parent=self.root)
+
+    # --- stream-docked mode --------------------------------------------------
+
+    def _toggle_stream_dock(self):
+        if self._stream_docked:
+            self._undock_from_stream()
+        else:
+            self._dock_to_stream()
+
+    def _dock_to_stream(self):
+        channel = self.pipeline.chat_channel if self.pipeline is not None else None
+        if not channel:
+            messagebox.showinfo(
+                "Dock to stream",
+                "No Twitch channel is set yet — pick one in the chat panel or Settings first.",
+                parent=self.root,
+            )
+            return
+        if self.dock_tracker is not None:
+            self.dock_tracker.stop()  # restart with the (possibly new) channel
+        self._stream_docked = True
+        self._last_dock_update = None
+        self.dock_tracker = DockTracker(channel, self._dock_queue)
+        self.dock_tracker.start()
+
+    def _undock_from_stream(self):
+        self._stream_docked = False
+        if self.dock_tracker is not None:
+            self.dock_tracker.stop()
+            self.dock_tracker = None
+        if not self.root.winfo_ismapped():  # was hidden because the tab wasn't visible
+            self.root.deiconify()
+
+    def _on_dragged(self, new_x: int, new_y: int):
+        """Wired as _make_draggable's on_move callback. While stream-docked,
+        a drag doesn't set an absolute position (the tracker owns that) —
+        it records how far the window has been manually shifted from the
+        tracker's own anchor point, so future updates keep following the
+        video but preserve that shift (decision: offset, not detach)."""
+        if not self._stream_docked or self._last_dock_update is None:
+            return
+        if not self._last_dock_update.visible:
+            return
+        anchor_left = self._last_dock_update.left
+        anchor_top = self._last_dock_update.bottom - self.root.winfo_height()
+        self._dock_offset_x = new_x - anchor_left
+        self._dock_offset_y = new_y - anchor_top
+
+    def _apply_dock_update(self, update: DockUpdate):
+        if not update.visible:
+            if self.root.winfo_ismapped():
+                self.root.withdraw()
+            return
+        if not self.root.winfo_ismapped():
+            self.root.deiconify()
+        # Width always matches the video (standard caption-bar behavior);
+        # height stays whatever the user last set via the resize grip.
+        # Attempting to resize width while docked will visibly snap back on
+        # the next poll tick (~66ms) — accepted tradeoff, not worth a
+        # separate "width-locked" grip mode for this first version.
+        height = self.root.winfo_height()
+        x = update.left + self._dock_offset_x
+        y = (update.bottom - height) + self._dock_offset_y
+        self.root.geometry(f"{update.width}x{height}+{x}+{y}")
 
     def _toggle_notes_overlay(self):
         if self.notes_overlay is not None:
@@ -535,8 +627,14 @@ class CaptionOverlay:
         SettingsPanel(self.root, self)
 
     def quit(self):
+        if self.dock_tracker is not None:
+            self.dock_tracker.stop()
         # Remember where the user put the windows for next launch.
-        updates = {"caption_geometry": self.root.geometry()}
+        updates = {
+            "caption_geometry": self.root.geometry(),
+            "caption_dock_offset_x": self._dock_offset_x,
+            "caption_dock_offset_y": self._dock_offset_y,
+        }
         if self.chat_overlay is not None:
             updates["chat_geometry"] = self.chat_overlay.win.geometry()
         try:
@@ -577,6 +675,14 @@ class CaptionOverlay:
             # if anything else toggles it.
             visible = self.chat_overlay.is_visible()
             self.chat_btn.configure(fg=ACTIVE_COLOR if visible else CONTROL_COLOR)
+        if self._stream_docked:
+            try:
+                while True:
+                    update = self._dock_queue.get_nowait()
+                    self._last_dock_update = update
+                    self._apply_dock_update(update)
+            except queue.Empty:
+                pass
         self.root.after(self.poll_ms, self._poll)
 
     def attach_chat(self, chat_queue: "queue.Queue[object]",
@@ -687,6 +793,8 @@ class ChatOverlay:
             save_settings({"chat_channel": channel})
         except OSError:
             pass
+        if self.caption_overlay is not None and self.caption_overlay._stream_docked:
+            self.caption_overlay._dock_to_stream()  # restart the tracker on the new channel's tab
         self.win.focus_set()  # drop focus out of the combobox now that Enter was handled
 
     def _refresh_channels(self, _event=None):

@@ -34,6 +34,11 @@ DEFAULTS: dict[str, Any] = {
     "context_helper_model": "Qwen/Qwen2.5-1.5B-Instruct",  # huggingface repo id, runs on CPU
     "asr_confidence_threshold": -0.6,  # transcriptions below this avg. log-prob get flagged too
     "window_opacity": 0.82,          # 0-1; applies to caption, chat, and settings windows
+    # Manual pixel adjustment from the video-docked auto-position, set by
+    # dragging while docked — like caption_geometry/chat_geometry, this is
+    # managed automatically and intentionally not a settings-panel row.
+    "caption_dock_offset_x": 0,
+    "caption_dock_offset_y": 0,
 }
 
 

@@ -62,9 +62,10 @@ in-app **Settings** dialog (every option below, editable with a GUI — includin
 the chat channel name), show/hide the chat panel, show/hide a small
 [performance stats window](#performance-stats) or the
 [context notes window](#context-helper), start/stop
-[recording a transcript](#transcript-recording), or quit. Press **Escape**
-with the caption window focused to quit. The chat panel's **✕** hides it;
-hiding it also pauses chat translation so it costs no GPU time.
+[recording a transcript](#transcript-recording),
+[dock the caption bar to the stream](#stream-docked-mode), or quit. Press
+**Escape** with the caption window focused to quit. The chat panel's **✕**
+hides it; hiding it also pauses chat translation so it costs no GPU time.
 
 Target language, like chat channel, can be changed live from Settings —
 takes effect on the next line translated, no restart needed.
@@ -149,6 +150,31 @@ than a setting.
 (original + translation, timestamped) to a file under `logs/` for the rest
 of the session, until you stop it or quit. Also manual and session-scoped
 by design — nothing gets recorded unless you explicitly start it.
+
+### Stream-docked mode
+
+**… menu → Dock to stream** makes the caption bar auto-position itself over
+the bottom of the Twitch video and follow it — including through scrolling
+the page, since it works by reading the video element's real position, not
+guessing from window geometry. It hides automatically when the tab isn't
+the one you're looking at (you switched tabs, or minimized Firefox) and
+reappears when it is again. Dragging while docked doesn't detach it — it
+nudges a saved offset from the video's edge, so you can fine-tune placement
+(avoid covering Twitch's own player controls, say) without losing tracking.
+
+This needs Firefox running with the `-marionette` flag, which opens a
+localhost-only automation port Firefox itself provides (this is what
+Selenium and similar tools use) — nothing exotic gets installed. A
+persistent `about:config` setting alone isn't enough; the flag has to be
+present at launch. The straightforward way to make that permanent: add
+`-marionette` to your Firefox shortcut's target/arguments once, and every
+future launch has it available, with no visible difference in normal
+browsing. If it's not active when you try to dock, the caption bar just
+won't move — no error dialog, since Firefox being closed or the tab having
+navigated away are both normal, expected states, not failures.
+
+Currently applies to the caption bar only — the chat panel keeps its
+existing docked-to-caption-bar behavior regardless of this mode.
 
 ### Settings
 
