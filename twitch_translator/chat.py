@@ -25,6 +25,28 @@ class ChatReader:
         self.channel = channel.lower().lstrip("#")
         self._sock: Optional[socket.socket] = None
 
+    def switch_channel(self, new_channel: str) -> None:
+        """Switches to a different channel on this same live connection —
+        PART the old one, JOIN the new one — instead of reconnecting from
+        scratch. Skips the TCP handshake and NICK registration round-trip,
+        which is most of what makes a full reconnect feel slow. Safe to call
+        from another thread while messages() is blocked in recv(): sendall
+        and recv don't interfere with each other on the same socket.
+        Raises if there's no live connection yet — callers should fall back
+        to a fresh ChatReader in that case."""
+        new_channel = new_channel.lower().lstrip("#")
+        sock = self._sock
+        if sock is None:
+            raise RuntimeError("not connected yet")
+        try:
+            sock.sendall(f"PART #{self.channel}\r\nJOIN #{new_channel}\r\n".encode())
+        finally:
+            # Updated even on a send failure: messages() filters by this
+            # value, so a half-failed switch shouldn't keep yielding the old
+            # channel's messages — better to yield nothing until the caller's
+            # retry/reconnect catches the dead connection.
+            self.channel = new_channel
+
     def stop(self):
         sock = self._sock
         if sock is not None:
@@ -63,8 +85,14 @@ class ChatReader:
                     if " PRIVMSG " not in text:
                         continue
                     prefix, _, rest = text.partition(" PRIVMSG ")
+                    target, _, message = rest.partition(" :")
+                    if target.lstrip("#").lower() != self.channel:
+                        # A switch_channel() call updates self.channel
+                        # immediately, but a message or two from the old
+                        # channel can still be in flight — drop stragglers
+                        # rather than mixing them into the new channel's feed.
+                        continue
                     username = prefix.lstrip(":").split("!", 1)[0]
-                    _, _, message = rest.partition(" :")
                     if message:
                         yield username, message
         finally:

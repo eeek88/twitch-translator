@@ -162,14 +162,27 @@ class Pipeline:
         self._threads: list[threading.Thread] = []
 
     def set_chat_channel(self, channel: Optional[str]) -> None:
-        """Switch the chat reader to a different channel immediately, rather
-        than waiting for the old connection to notice and time out."""
+        """Switch the chat reader to a different channel. If a connection is
+        already live, switches channel on it directly (IRC PART/JOIN) rather
+        than tearing down and reconnecting — skips the TCP handshake and NICK
+        registration round-trip, which is most of what makes a full reconnect
+        feel slow. Falls back to a full reconnect (via stop(), same as
+        before) when there's no live connection yet, or the live switch
+        itself fails, or the new channel is None (nothing to join)."""
         self.chat_channel = channel
         while True:  # old channel's backlog shouldn't bleed into the new one
             try:
                 self._chat_in_queue.get_nowait()
             except queue.Empty:
                 break
+        with self._chat_reader_lock:
+            reader = self._chat_reader
+        if reader is not None and channel:
+            try:
+                reader.switch_channel(channel)
+                return
+            except Exception:
+                pass  # dead connection or similar — fall through to a full reconnect
         with self._chat_reader_lock:
             if self._chat_reader is not None:
                 self._chat_reader.stop()
@@ -234,8 +247,12 @@ class Pipeline:
                 self._chat_reader = reader
             try:
                 for username, message in reader.messages():
-                    if self._stop.is_set() or self.chat_channel != channel:
-                        break  # explicit stop, or a deliberate channel switch — not a failure
+                    # reader.channel (not the local `channel`) reflects a live
+                    # switch_channel() call — this connection is meant to keep
+                    # running through those, so only a stop() (which leaves
+                    # reader.channel behind) or explicit pipeline stop ends it.
+                    if self._stop.is_set() or self.chat_channel != reader.channel:
+                        break  # explicit stop, or a switch that needed a fresh connection
                     backoff = 2.0
                     if not self._chat_enabled.is_set():
                         continue  # panel hidden: keep the socket alive but do no work
@@ -254,7 +271,7 @@ class Pipeline:
             except Exception as exc:
                 if self._stop.is_set():
                     return
-                if self.chat_channel == channel:  # a switch-triggered close isn't an error
+                if self.chat_channel == reader.channel:  # a switch-triggered close isn't an error
                     _log(f"[chat error, retrying: {exc}]")
             finally:
                 with self._chat_reader_lock:
@@ -263,8 +280,8 @@ class Pipeline:
 
             if self._stop.is_set():
                 return
-            if self.chat_channel != channel:
-                continue  # switched channels — reconnect immediately, no backoff
+            if self.chat_channel != reader.channel:
+                continue  # switched to a channel this connection couldn't join live — reconnect now
             time.sleep(backoff)
             backoff = min(backoff * 2, 30.0)
 

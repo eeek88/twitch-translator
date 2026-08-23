@@ -620,6 +620,11 @@ class ChatOverlay:
             return
         self.pipeline.set_chat_channel(channel)
         self.scrollback.clear()
+        # Switching now usually reuses the live connection (IRC PART/JOIN,
+        # see Pipeline.set_chat_channel) rather than reconnecting from
+        # scratch, so messages typically resume in well under a second — but
+        # a blank panel with no feedback still reads as broken in that gap.
+        self.scrollback.append([(f"— now watching #{channel} —", "time")])
         try:
             save_settings({"chat_channel": channel})
         except OSError:
