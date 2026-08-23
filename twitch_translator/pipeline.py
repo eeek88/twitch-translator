@@ -71,6 +71,11 @@ class ChatLine:
     line_id: int = field(default_factory=lambda: next(_line_ids))
     needs_context: bool = False
 
+    @classmethod
+    def status(cls, message: str) -> "ChatLine":
+        """A non-fatal informational line (e.g. reconnect attempts) rendered like a chat line."""
+        return cls("", "system", "", message)
+
 
 @dataclass
 class ContextReady:
@@ -111,6 +116,7 @@ class Pipeline:
         context_helper_enabled: bool = True,
         context_confidence_threshold: float = -0.5,
         context_helper_model: str = DEFAULT_CONTEXT_MODEL_NAME,
+        asr_confidence_threshold: float = -0.6,
     ):
         self.audio_source = audio_source
         self.target = target
@@ -120,6 +126,7 @@ class Pipeline:
         self.context_helper_enabled = context_helper_enabled
         self.context_confidence_threshold = context_confidence_threshold
         self.context_helper_model = context_helper_model
+        self.asr_confidence_threshold = asr_confidence_threshold
         self._chat_reader = None
         self._chat_reader_lock = threading.Lock()
 
@@ -273,6 +280,7 @@ class Pipeline:
                     return
                 if self.chat_channel == reader.channel:  # a switch-triggered close isn't an error
                     _log(f"[chat error, retrying: {exc}]")
+                    self.chat_out_queue.put(ChatLine.status(f"[chat error, retrying: {exc}]"))
             finally:
                 with self._chat_reader_lock:
                     if self._chat_reader is reader:
@@ -298,7 +306,8 @@ class Pipeline:
                 self.caption_queue.put(None)
                 return
             try:
-                text, lang = self.asr.transcribe(utterance)
+                asr_result = self.asr.transcribe_scored(utterance)
+                text, lang = asr_result.text, asr_result.language
                 if not text:
                     continue
                 nllb_lang = to_nllb(lang)
@@ -308,7 +317,8 @@ class Pipeline:
                     continue
                 _log(f"[{lang}] {text!r} -> {result.text!r}")
                 caption = Caption(lang, text, result.text)
-                self._maybe_flag_for_context(caption, text, result, lang, is_chat=False)
+                self._maybe_flag_for_context(caption, text, result, lang, is_chat=False,
+                                             asr_confidence=asr_result.confidence)
                 self.caption_queue.put(caption)
             except Exception as exc:
                 self.caption_queue.put(Caption.status(f"[transcription error: {exc}]"))
@@ -333,16 +343,26 @@ class Pipeline:
         except Exception as exc:
             _log(f"[chat translation error: {exc}]")
 
-    def _maybe_flag_for_context(self, line, original_text: str, result, lang: str, is_chat: bool) -> None:
+    def _maybe_flag_for_context(self, line, original_text: str, result, lang: str, is_chat: bool,
+                                asr_confidence: Optional[float] = None) -> None:
         """Marks a line for the context helper when the translation model's own
-        confidence was low. Text matching something already explained (or
-        currently being explained) skips straight to that result instead of
-        triggering another LLM call — covers both a recurring phrase (cache)
-        and a burst of near-duplicate chat messages arriving together
-        (in-flight coalescing)."""
+        confidence was low, or — for speech, where asr_confidence is given —
+        Whisper's own transcription confidence was low. The latter catches a
+        failure mode translation confidence alone can't: a mis-heard word
+        produces a confident-sounding wrong translation, since the error
+        already happened upstream of where NLLB's confidence is measured.
+        Text matching something already explained (or currently being
+        explained) skips straight to that result instead of triggering
+        another LLM call — covers both a recurring phrase (cache) and a
+        burst of near-duplicate chat messages arriving together (in-flight
+        coalescing)."""
         if not self.context_helper_enabled:
             return
-        if result.confidence >= self.context_confidence_threshold:
+        shaky_translation = result.confidence < self.context_confidence_threshold
+        shaky_transcription = (
+            asr_confidence is not None and asr_confidence < self.asr_confidence_threshold
+        )
+        if not (shaky_translation or shaky_transcription):
             return
         key = _normalize_for_cache(original_text)
         with self._context_cache_lock:

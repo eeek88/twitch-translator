@@ -655,11 +655,14 @@ class ChatOverlay:
                     self.scrollback.set_context(item.line_id, item.context)
                     continue
                 line: ChatLine = item
-                self.scrollback.append([
-                    (f"{line.username}: ", "name"),
-                    (line.translated_text, None),
-                ], original=line.original_text,
-                   line_id=line.line_id, flagged=line.needs_context)
+                if line.username:
+                    segments = [(f"{line.username}: ", "name"), (line.translated_text, None)]
+                else:
+                    # status line (e.g. a reconnect attempt) — no username to
+                    # prefix, styled dim like the "now watching" confirmation
+                    segments = [(line.translated_text, "time")]
+                self.scrollback.append(segments, original=line.original_text,
+                                       line_id=line.line_id, flagged=line.needs_context)
         except queue.Empty:
             pass
         self.win.after(self.poll_ms, self._poll)
@@ -808,6 +811,20 @@ class SettingsPanel:
                     messagebox.showerror(
                         "Invalid value",
                         f"{spec.label} must be a number (got {raw!r}).",
+                        parent=self.win,
+                    )
+                    return
+                if spec.min_value is not None and value < spec.min_value:
+                    messagebox.showerror(
+                        "Invalid value",
+                        f"{spec.label} must be at least {spec.min_value} (got {value}).",
+                        parent=self.win,
+                    )
+                    return
+                if spec.max_value is not None and value > spec.max_value:
+                    messagebox.showerror(
+                        "Invalid value",
+                        f"{spec.label} must be at most {spec.max_value} (got {value}).",
                         parent=self.win,
                     )
                     return

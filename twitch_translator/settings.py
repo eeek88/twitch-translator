@@ -32,6 +32,7 @@ DEFAULTS: dict[str, Any] = {
     "enable_context_helper": True,   # flag shaky translations and explain them on hover (runs on CPU)
     "context_confidence_threshold": -0.5,  # translations below this avg. log-prob get flagged
     "context_helper_model": "Qwen/Qwen2.5-1.5B-Instruct",  # huggingface repo id, runs on CPU
+    "asr_confidence_threshold": -0.6,  # transcriptions below this avg. log-prob get flagged too
 }
 
 
@@ -44,6 +45,8 @@ class SettingSpec:
     live: bool = False               # can apply without restarting the app
     advanced: bool = False           # hidden behind the settings panel's "Advanced" toggle
     help: str = ""
+    min_value: Optional[float] = None  # inclusive; int/float kinds only
+    max_value: Optional[float] = None  # inclusive; int/float kinds only
 
 
 # Drives the in-app settings panel: one row per user-facing setting.
@@ -70,28 +73,39 @@ SETTING_SPECS: list[SettingSpec] = [
     SettingSpec("enable_chat", "Chat panel", "bool", live=True,
                 help="show translated chat messages in a second window"),
     SettingSpec("caption_font_size", "Caption font size", "int", live=True,
-                help="also adjustable with Ctrl+scroll directly on the caption window"),
+                help="also adjustable with Ctrl+scroll directly on the caption window",
+                min_value=8, max_value=48),  # keep in sync with overlay.py's MIN/MAX_FONT_SIZE
     SettingSpec("chat_font_size", "Chat font size", "int", live=True,
-                help="also adjustable with Ctrl+scroll directly on the chat window"),
+                help="also adjustable with Ctrl+scroll directly on the chat window",
+                min_value=8, max_value=48),
     # --- advanced: fine-tuning knobs, touched far less often ---
     SettingSpec("chat_channel", "Chat channel", "text", live=True, advanced=True,
                 help="also (and better) editable directly on the chat panel, with tab detection"),
     SettingSpec("vad_threshold", "VAD speech threshold", "float", advanced=True,
-                help="0-1; higher = stricter about what counts as speech"),
+                help="0-1; higher = stricter about what counts as speech",
+                min_value=0.0, max_value=1.0),
     SettingSpec("vad_min_silence_ms", "VAD silence gap (ms)", "int", advanced=True,
-                help="pause length that ends a sentence; higher = fewer mid-sentence cuts, more lag"),
+                help="pause length that ends a sentence; higher = fewer mid-sentence cuts, more lag",
+                min_value=0),
     SettingSpec("vad_min_speech_ms", "VAD min speech (ms)", "int", advanced=True,
-                help="shorter utterances are ignored as noise"),
+                help="shorter utterances are ignored as noise",
+                min_value=0),
     SettingSpec("vad_max_speech_ms", "VAD max speech (ms)", "int", advanced=True,
-                help="utterances are cut at this length to bound latency"),
+                help="utterances are cut at this length to bound latency",
+                min_value=1),
     SettingSpec("chat_queue_maxsize", "Chat queue size", "int", advanced=True,
-                help="pending chat translations before new ones are dropped"),
+                help="pending chat translations before new ones are dropped",
+                min_value=1),
     SettingSpec("enable_context_helper", "Context helper", "bool", advanced=True,
                 help="flag shaky translations (● marker) with a hover explanation, via a small CPU model"),
     SettingSpec("context_confidence_threshold", "Context helper threshold", "float", advanced=True,
-                help="avg. log-prob below this gets flagged; more negative = only the shakiest lines"),
+                help="avg. log-prob below this gets flagged; more negative = only the shakiest lines",
+                max_value=0.0),
     SettingSpec("context_helper_model", "Context helper model", "text", advanced=True,
                 help="huggingface repo id; runs on CPU, so bigger = slower notes, not slower captions"),
+    SettingSpec("asr_confidence_threshold", "ASR confidence threshold", "float", advanced=True,
+                help="speech lines are also flagged if Whisper's own avg. log-prob falls below this",
+                max_value=0.0),
 ]
 
 

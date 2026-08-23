@@ -117,6 +117,9 @@ def parse_args():
                          f"(default: {s['context_confidence_threshold']})")
     p.add_argument("--context-helper-model", default=s["context_helper_model"],
                     help=f"huggingface repo id for the context helper, runs on CPU (default: {s['context_helper_model']})")
+    p.add_argument("--asr-confidence-threshold", type=float, default=s["asr_confidence_threshold"],
+                    help="speech lines are also flagged if Whisper's own avg. log-prob falls below this "
+                         f"(default: {s['asr_confidence_threshold']})")
     return p.parse_args()
 
 
@@ -170,6 +173,7 @@ def main():
         context_helper_enabled=not args.no_context_helper,
         context_confidence_threshold=args.context_confidence_threshold,
         context_helper_model=args.context_helper_model,
+        asr_confidence_threshold=args.asr_confidence_threshold,
     )
     pipeline.start()
 

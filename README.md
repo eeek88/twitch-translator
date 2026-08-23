@@ -112,6 +112,13 @@ messages: only the first triggers a CPU call, the rest piggyback on its
 result. Together these keep CPU cost roughly proportional to how much
 *distinct* shaky text actually shows up, not to line volume.
 
+Speech lines get flagged by two independent signals, not just NLLB's
+translation confidence: faster-whisper's own confidence in the
+*transcription* is checked too. This catches a case translation confidence
+alone can't — Whisper mishears a word, and NLLB then translates that wrong
+text fluently and confidently, so nothing about the translation itself looks
+shaky even though the whole line is wrong from the start.
+
 ### Settings
 
 Defaults live in `settings.json` at the project root — edit them from the
@@ -139,6 +146,8 @@ run only:
 --context-confidence-threshold FLOAT
                               avg. log-prob below this gets flagged (see context helper section)
 --context-helper-model TEXT  huggingface repo id for the context helper (runs on CPU)
+--asr-confidence-threshold FLOAT
+                              speech lines also get flagged below this Whisper avg. log-prob
 ```
 
 **Quality vs. speed/VRAM tradeoffs** worth knowing about:
