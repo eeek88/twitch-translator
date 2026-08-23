@@ -6,6 +6,8 @@ with the live speech/chat pipeline for VRAM or GPU scheduling time.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -17,22 +19,33 @@ _SYSTEM_PROMPT = (
     "original most likely means, flag slang/wordplay/names that don't "
     "translate cleanly, or say the meaning is genuinely unclear if you can't "
     "tell. Do not just repeat the translation. Reply with only the note, no "
-    "preamble."
+    "preamble. Recent chat may be included for situational context — use it "
+    "only if it actually helps; ignore it otherwise."
 )
 
 
 class ContextHelper:
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        # bfloat16 on CPU: half the download/RAM of fp32, and modern CPUs
-        # handle it fine for a model this small — this only ever runs on the
-        # occasional flagged line, so raw throughput isn't the bottleneck.
-        self.model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.bfloat16)
+        # float32, not bfloat16: measured live, bf16 was ~13x slower per token
+        # on a consumer CPU (2.9s/tok vs 0.22s/tok) — client Intel/AMD chips
+        # since ~2022 dropped AVX-512 (E-cores don't support it), so bf16 has
+        # no hardware acceleration and PyTorch falls back to slow emulation.
+        # fp32 costs ~2x the RAM but runs on the CPU's actual fast path.
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, dtype=torch.float32)
         self.model.eval()
 
     @torch.inference_mode()
-    def explain(self, original_text: str, translated_text: str, src_lang: str) -> str:
+    def explain(self, original_text: str, translated_text: str, src_lang: str,
+               recent_chat: Optional[list[str]] = None) -> str:
+        context_block = ""
+        if recent_chat:
+            context_block = (
+                "Recent chat messages (already translated to English), for "
+                "context only:\n" + "\n".join(recent_chat) + "\n\n"
+            )
         user = (
+            f"{context_block}"
             f"Source language: {src_lang}\n"
             f"Original: {original_text!r}\n"
             f"Translation: {translated_text!r}"

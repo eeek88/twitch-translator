@@ -115,6 +115,8 @@ def parse_args():
     p.add_argument("--context-confidence-threshold", type=float, default=s["context_confidence_threshold"],
                     help="avg. log-prob below this gets flagged as shaky "
                          f"(default: {s['context_confidence_threshold']})")
+    p.add_argument("--context-helper-model", default=s["context_helper_model"],
+                    help=f"huggingface repo id for the context helper, runs on CPU (default: {s['context_helper_model']})")
     return p.parse_args()
 
 
@@ -167,6 +169,7 @@ def main():
         chat_disabled=args.no_chat,
         context_helper_enabled=not args.no_context_helper,
         context_confidence_threshold=args.context_confidence_threshold,
+        context_helper_model=args.context_helper_model,
     )
     pipeline.start()
 

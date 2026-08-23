@@ -11,6 +11,9 @@ Threads, connected by queues:
     GPU work because the models aren't safe to call concurrently and loading a
     second copy would waste VRAM. Speech has strict priority; chat messages are
     only translated when no utterance is waiting.
+  - context-helper thread (optional): explains translations the translation
+    model itself was unconfident about. Deliberately kept off the GPU (a
+    separate small CPU-only model) and off the above threads' critical path.
 """
 from __future__ import annotations
 
@@ -19,18 +22,30 @@ import queue
 import sys
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Iterator, Optional
 
 from . import capture
 from .asr import ASR
+from .context_helper import DEFAULT_MODEL_NAME as DEFAULT_CONTEXT_MODEL_NAME
 from .langcodes import WHISPER_TO_NLLB, to_nllb
 from .translate import DEFAULT_MODEL_NAME, Translator
 from .vad import VADSegmenter
 
 CHAT_DETECT_MIN_CONFIDENCE = 0.9  # below this, short-text language detection is guesswork
+CONTEXT_QUEUE_MAXSIZE = 20  # pending context-helper requests before new ones drop
+CONTEXT_CACHE_MAXSIZE = 500  # cached notes kept before the oldest is evicted
+RECENT_CHAT_MAXLEN = 5  # translated chat lines kept as context for the helper's notes
 
 _line_ids = itertools.count()
+
+
+def _normalize_for_cache(text: str) -> str:
+    """Collapses whitespace/case differences so near-identical repeats (a
+    recurring phrase, a chat burst of copies with a stray space or two) hit
+    the same cache entry instead of each triggering their own LLM call."""
+    return " ".join(text.split()).lower()
 
 
 @dataclass
@@ -95,6 +110,7 @@ class Pipeline:
         chat_disabled: bool = False,
         context_helper_enabled: bool = True,
         context_confidence_threshold: float = -0.5,
+        context_helper_model: str = DEFAULT_CONTEXT_MODEL_NAME,
     ):
         self.audio_source = audio_source
         self.target = target
@@ -103,6 +119,7 @@ class Pipeline:
         self.chat_disabled = chat_disabled
         self.context_helper_enabled = context_helper_enabled
         self.context_confidence_threshold = context_confidence_threshold
+        self.context_helper_model = context_helper_model
         self._chat_reader = None
         self._chat_reader_lock = threading.Lock()
 
@@ -123,11 +140,22 @@ class Pipeline:
         self._chat_in_queue: "queue.Queue[tuple[str, str, str]]" = queue.Queue(maxsize=chat_queue_maxsize)
         self.caption_queue: "queue.Queue[object]" = queue.Queue()
         self.chat_out_queue: "queue.Queue[object]" = queue.Queue()
-        # (line_id, original_text, translated_text, lang, is_chat) for flagged
-        # lines awaiting a context-helper explanation. Unbounded: this is a
-        # slow CPU path fed at whatever rate flagged lines occur, not a
-        # real-time stream that needs a drop policy like the others.
-        self._context_queue: "queue.Queue[tuple[int, str, str, str, bool]]" = queue.Queue()
+        # (cache_key, original_text, translated_text, lang) for text awaiting a
+        # context-helper explanation. Bounded: under a sustained high flag rate
+        # (e.g. an aggressive confidence threshold on a busy chat) the CPU
+        # worker can't keep up, so excess requests drop rather than backlog
+        # forever (confirmed live: unbounded, this grew ~1GB/36s under stress).
+        self._context_queue: "queue.Queue[tuple[str, str, str, str]]" = queue.Queue(maxsize=CONTEXT_QUEUE_MAXSIZE)
+        # cache_key -> note, for text seen before (recurring phrases skip the
+        # LLM call entirely); cache_key -> [(line_id, is_chat), ...] for text
+        # currently being processed (concurrent duplicates piggyback on that
+        # one in-flight call instead of each starting their own).
+        self._context_cache: dict[str, str] = {}
+        self._context_inflight: dict[str, list[tuple[int, bool]]] = {}
+        self._context_cache_lock = threading.Lock()
+        # Recent translated chat lines, given to the context helper as extra
+        # situational context for its notes.
+        self._recent_chat: "deque[str]" = deque(maxlen=RECENT_CHAT_MAXLEN)
         self._stop = threading.Event()
         self._chat_enabled = threading.Event()
         self._chat_enabled.set()
@@ -281,6 +309,7 @@ class Pipeline:
                 _log(f"[chat/{lang}] {username}: {message!r} -> (suppressed: repetition loop)")
                 return
             _log(f"[chat/{lang}] {username}: {message!r} -> {result.text!r}")
+            self._recent_chat.append(f"{username}: {result.text}")
             chat_line = ChatLine(username, lang, message, result.text)
             self._maybe_flag_for_context(chat_line, message, result, lang, is_chat=True)
             self.chat_out_queue.put(chat_line)
@@ -289,13 +318,34 @@ class Pipeline:
 
     def _maybe_flag_for_context(self, line, original_text: str, result, lang: str, is_chat: bool) -> None:
         """Marks a line for the context helper when the translation model's own
-        confidence was low, and queues it for the CPU context-worker thread."""
+        confidence was low. Text matching something already explained (or
+        currently being explained) skips straight to that result instead of
+        triggering another LLM call — covers both a recurring phrase (cache)
+        and a burst of near-duplicate chat messages arriving together
+        (in-flight coalescing)."""
         if not self.context_helper_enabled:
             return
         if result.confidence >= self.context_confidence_threshold:
             return
+        key = _normalize_for_cache(original_text)
+        with self._context_cache_lock:
+            cached = self._context_cache.get(key)
+            if cached is not None:
+                line.needs_context = True
+                target_queue = self.chat_out_queue if is_chat else self.caption_queue
+                target_queue.put(ContextReady(line.line_id, cached))
+                return
+            waiters = self._context_inflight.get(key)
+            if waiters is not None:
+                waiters.append((line.line_id, is_chat))
+                line.needs_context = True
+                return
+            try:
+                self._context_queue.put_nowait((key, original_text, result.text, lang))
+            except queue.Full:
+                return  # backlog full: skip flagging rather than show a marker that never resolves
+            self._context_inflight[key] = [(line.line_id, is_chat)]
         line.needs_context = True
-        self._context_queue.put((line.line_id, original_text, result.text, lang, is_chat))
 
     def _context_worker(self):
         """Explains flagged lines on CPU, off the GPU worker's critical path
@@ -304,22 +354,30 @@ class Pipeline:
         helper = None
         while not self._stop.is_set():
             try:
-                line_id, original_text, translated_text, lang, is_chat = self._context_queue.get(timeout=0.5)
+                key, original_text, translated_text, lang = self._context_queue.get(timeout=0.5)
             except queue.Empty:
                 continue
             if helper is None:
                 _log("Loading context-helper model (first flagged line)...")
                 from .context_helper import ContextHelper
-                helper = ContextHelper()
+                helper = ContextHelper(model_name=self.context_helper_model)
             try:
-                note = helper.explain(original_text, translated_text, lang)
+                note = helper.explain(original_text, translated_text, lang,
+                                      recent_chat=list(self._recent_chat))
             except Exception as exc:
                 _log(f"[context helper error: {exc}]")
-                continue
+                note = ""
+            with self._context_cache_lock:
+                waiters = self._context_inflight.pop(key, [])
+                if note:
+                    self._context_cache[key] = note
+                    if len(self._context_cache) > CONTEXT_CACHE_MAXSIZE:
+                        del self._context_cache[next(iter(self._context_cache))]
             if not note:
                 continue
-            target_queue = self.chat_out_queue if is_chat else self.caption_queue
-            target_queue.put(ContextReady(line_id, note))
+            for line_id, is_chat in waiters:
+                target_queue = self.chat_out_queue if is_chat else self.caption_queue
+                target_queue.put(ContextReady(line_id, note))
 
     def start(self):
         self._threads = [

@@ -31,6 +31,7 @@ DEFAULTS: dict[str, Any] = {
     "chat_font_size": 11,            # also adjustable with Ctrl+scroll on the chat window
     "enable_context_helper": True,   # flag shaky translations and explain them on hover (runs on CPU)
     "context_confidence_threshold": -0.5,  # translations below this avg. log-prob get flagged
+    "context_helper_model": "Qwen/Qwen2.5-1.5B-Instruct",  # huggingface repo id, runs on CPU
 }
 
 
@@ -89,6 +90,8 @@ SETTING_SPECS: list[SettingSpec] = [
                 help="flag shaky translations (● marker) with a hover explanation, via a small CPU model"),
     SettingSpec("context_confidence_threshold", "Context helper threshold", "float", advanced=True,
                 help="avg. log-prob below this gets flagged; more negative = only the shakiest lines"),
+    SettingSpec("context_helper_model", "Context helper model", "text", advanced=True,
+                help="huggingface repo id; runs on CPU, so bigger = slower notes, not slower captions"),
 ]
 
 
